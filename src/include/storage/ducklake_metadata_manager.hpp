@@ -19,6 +19,7 @@
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_transaction_changes.hpp"
 #include "common/ducklake_encryption.hpp"
 #include "common/ducklake_options.hpp"
 #include "common/index.hpp"
@@ -430,6 +431,16 @@ public:
 	virtual set<idx_t> GetPinnedSnapshotIds();
 	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
 	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
+	//! Phase 3/4: merge source branch into target (FF when possible, else three-way).
+	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,
+	                                              bool dry_run);
+	//! Snapshots visible on a branch (own + lineage-capped ancestors).
+	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());
+	//! Aggregate snapshot_changes for a branch in (after_snapshot, through_snapshot].
+	virtual SnapshotChangeInformation GetBranchChangesSince(idx_t branch_id, idx_t after_snapshot,
+	                                                        idx_t through_snapshot);
+	//! Common ancestor (fork / last-merge cap) of source relative to target.
+	virtual idx_t GetMergeBaseSnapshot(idx_t source_branch_id, idx_t target_branch_id);
 
 	string LoadPath(string path);
 	string StorePath(string path);

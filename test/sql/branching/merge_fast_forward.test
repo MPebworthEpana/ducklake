@@ -1,0 +1,77 @@
+# name: test/sql/branching/merge_fast_forward.test
+# description: Phase 3 — fast-forward merge with re-own
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_merge_ff')
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.base VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+CREATE TABLE ducklake.feature(s VARCHAR);
+
+statement ok
+INSERT INTO ducklake.feature VALUES ('hello');
+
+statement ok
+INSERT INTO ducklake.base VALUES (10);
+
+# dry_run reports fast_forward without applying
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('dev', target := 'main', dry_run := true)
+----
+fast_forward
+
+# main still does not see feature table
+statement ok
+CALL ducklake.use_branch('main')
+
+statement error
+SELECT * FROM ducklake.feature
+----
+feature
+
+statement ok
+CALL ducklake.merge_branch('dev', target := 'main')
+
+query I
+SELECT merge_type FROM ducklake.merge_branch('dev', target := 'main', dry_run := true) LIMIT 1
+----
+already_up_to_date
+
+query I
+SELECT * FROM ducklake.feature
+----
+hello
+
+query I
+SELECT count(*) FROM ducklake.base
+----
+2
+
+# Dropping the merged branch (no longer owns snapshots) succeeds
+statement ok
+CALL ducklake.drop_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.refs() WHERE ref_type = 'branch'
+----
+1

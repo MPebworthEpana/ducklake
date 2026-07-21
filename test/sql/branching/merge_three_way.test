@@ -1,0 +1,80 @@
+# name: test/sql/branching/merge_three_way.test
+# description: Phase 4 — three-way merge, conflicts, and compose-clean appends
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_merge_3way')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+# Divergent commits: main and dev both append (compose-clean)
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (3);
+
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('dev', target := 'main', dry_run := true)
+----
+three_way
+
+statement ok
+CALL ducklake.merge_branch('dev', target := 'main')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+2
+3
+
+# Conflict: both sides alter the same table
+statement ok
+CALL ducklake.create_branch('alter_dev')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+ALTER TABLE ducklake.t ADD COLUMN j INTEGER;
+
+statement ok
+CALL ducklake.use_branch('alter_dev')
+
+statement ok
+ALTER TABLE ducklake.t ADD COLUMN k INTEGER;
+
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('alter_dev', target := 'main', dry_run := true)
+----
+conflicts
+
+statement error
+CALL ducklake.merge_branch('alter_dev', target := 'main')
+----
+Merge conflict

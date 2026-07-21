@@ -77,21 +77,16 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	}
 
 	string filter;
-	// we can never delete the most recent snapshot
-	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
-	// Phase 1: never expire snapshots pinned by live refs
+	// we can never delete the most recent snapshot of any live branch head / pin / fork point
+	filter = "TRUE AND ";
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	auto &metadata_manager = transaction.GetMetadataManager();
-	// Phase 2 interim: refuse expiry when multiple live branches exist (full branch-aware GC is P3)
-	if (catalog.Cast<DuckLakeCatalog>().SupportsWritableBranches()) {
-		auto refs = metadata_manager.GetRefs("branch");
-		if (refs.size() > 1) {
-			throw InvalidInputException(
-			    "ducklake_expire_snapshots is not supported while multiple branches exist; "
-			    "branch-aware garbage collection arrives in a later phase");
-		}
-	}
+	// Phase 3: branch-aware expiry — pin heads, tags, and fork points (no multi-branch refuse)
 	auto pinned = metadata_manager.GetPinnedSnapshotIds();
+	if (pinned.empty()) {
+		// Fallback: never delete global max when refs are unavailable
+		filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
+	}
 	if (has_versions) {
 		// Explicit versions list: error if any requested snapshot is pinned
 		for (auto &snapshot_id_str : StringUtil::Split(snapshot_list, ", ")) {

@@ -109,6 +109,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeUseBranchFunction use_branch;
 	loader.RegisterFunction(use_branch);
 
+	DuckLakeMergeBranchFunction merge_branch;
+	loader.RegisterFunction(merge_branch);
+
 	auto table_changes = DuckLakeTableInsertionsFunction::GetDuckLakeTableChanges();
 	loader.RegisterFunction(*table_changes);
 

@@ -312,6 +312,9 @@ struct DuckLakeSnapshotInfo {
 	Value author;
 	Value commit_message;
 	Value commit_extra_info;
+	//! Owning branch id when SupportsWritableBranches(); unset otherwise.
+	optional_idx branch_id;
+	string branch_name;
 };
 
 struct DuckLakeViewColumnTag {
@@ -576,6 +579,20 @@ struct DuckLakeRefInfo {
 	optional_idx parent_ref_id;
 	string status = "active";
 	timestamp_tz_t created_at;
+};
+
+struct DuckLakeMergeBranchResult {
+	string merge_type; // "fast_forward", "three_way", "already_up_to_date", "conflicts"
+	string source_branch;
+	string target_branch;
+	idx_t ancestor_snapshot = 0;
+	idx_t source_head = 0;
+	idx_t target_head = 0;
+	idx_t new_target_head = 0;
+	idx_t source_branch_id = 0;
+	idx_t target_branch_id = 0;
+	bool dry_run = false;
+	vector<string> messages;
 };
 
 } // namespace duckdb

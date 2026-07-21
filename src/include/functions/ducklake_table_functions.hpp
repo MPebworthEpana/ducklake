@@ -46,6 +46,7 @@ public:
 	DuckLakeSnapshotsFunction();
 
 	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<string> &names);
+	static void GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names);
 	static vector<Value> GetSnapshotValues(const DuckLakeSnapshotInfo &snapshot);
 };
 
@@ -138,6 +139,11 @@ public:
 class DuckLakeUseBranchFunction : public TableFunction {
 public:
 	DuckLakeUseBranchFunction();
+};
+
+class DuckLakeMergeBranchFunction : public TableFunction {
+public:
+	DuckLakeMergeBranchFunction();
 };
 
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {

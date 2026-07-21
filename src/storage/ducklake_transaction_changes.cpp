@@ -218,4 +218,201 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 	return result;
 }
 
+namespace {
+
+template <class T>
+void MergeSet(set<T> &target, const set<T> &other) {
+	target.insert(other.begin(), other.end());
+}
+
+void MergeCreatedMap(case_insensitive_map_t<case_insensitive_map_t<string>> &target,
+                     const case_insensitive_map_t<case_insensitive_map_t<string>> &other) {
+	for (auto &schema_entry : other) {
+		auto &dest = target[schema_entry.first];
+		for (auto &name_entry : schema_entry.second) {
+			dest.insert(name_entry);
+		}
+	}
+}
+
+template <class T>
+void CollectIndexConflicts(vector<string> &conflicts, const set<T> &source, const set<T> &target, const char *action,
+                           const char *other_action) {
+	for (auto &idx : source) {
+		if (target.find(idx) != target.end()) {
+			conflicts.push_back(StringUtil::Format(
+			    "Merge conflict - both branches %s object with index %llu (%s)", action, idx.index, other_action));
+		}
+	}
+}
+
+void CollectNameConflicts(vector<string> &conflicts, const case_insensitive_set_t &source,
+                          const case_insensitive_set_t &target, const char *action) {
+	for (auto &name : source) {
+		if (target.find(name) != target.end()) {
+			conflicts.push_back(StringUtil::Format("Merge conflict - both branches %s \"%s\"", action, name));
+		}
+	}
+}
+
+void CollectCreatedEntryConflicts(vector<string> &conflicts,
+                                  const case_insensitive_map_t<case_insensitive_map_t<string>> &source,
+                                  const case_insensitive_map_t<case_insensitive_map_t<string>> &target,
+                                  const char *action) {
+	for (auto &schema_entry : source) {
+		auto tgt_schema = target.find(schema_entry.first);
+		if (tgt_schema == target.end()) {
+			continue;
+		}
+		for (auto &name_entry : schema_entry.second) {
+			auto tgt_name = tgt_schema->second.find(name_entry.first);
+			if (tgt_name != tgt_schema->second.end()) {
+				conflicts.push_back(StringUtil::Format(
+				    "Merge conflict - both branches %s \"%s\".\"%s\"", action, schema_entry.first, name_entry.first));
+			}
+		}
+	}
+}
+
+template <class T>
+void CollectCrossConflicts(vector<string> &conflicts, const set<T> &source, const set<T> &target, const char *source_op,
+                           const char *target_op) {
+	for (auto &idx : source) {
+		if (target.find(idx) != target.end()) {
+			conflicts.push_back(StringUtil::Format(
+			    "Merge conflict - source %s while target %s object with index %llu", source_op, target_op, idx.index));
+		}
+	}
+}
+
+} // namespace
+
+void MergeSnapshotChangeInformation(SnapshotChangeInformation &target, const SnapshotChangeInformation &other) {
+	for (auto &schema : other.created_schemas) {
+		target.created_schemas.insert(schema);
+	}
+	MergeSet(target.dropped_schemas, other.dropped_schemas);
+	MergeCreatedMap(target.created_tables, other.created_tables);
+	MergeCreatedMap(target.created_scalar_macros, other.created_scalar_macros);
+	MergeCreatedMap(target.created_table_macros, other.created_table_macros);
+	MergeSet(target.altered_tables, other.altered_tables);
+	MergeSet(target.altered_views, other.altered_views);
+	MergeSet(target.dropped_tables, other.dropped_tables);
+	MergeSet(target.dropped_views, other.dropped_views);
+	MergeSet(target.dropped_scalar_macros, other.dropped_scalar_macros);
+	MergeSet(target.dropped_table_macros, other.dropped_table_macros);
+	MergeSet(target.inserted_tables, other.inserted_tables);
+	MergeSet(target.tables_deleted_from, other.tables_deleted_from);
+	MergeSet(target.tables_compacted, other.tables_compacted);
+	MergeSet(target.tables_merge_adjacent, other.tables_merge_adjacent);
+	MergeSet(target.tables_rewrite_delete, other.tables_rewrite_delete);
+	MergeSet(target.tables_inserted_inlined, other.tables_inserted_inlined);
+	MergeSet(target.tables_deleted_inlined, other.tables_deleted_inlined);
+	MergeSet(target.tables_flushed_inlined, other.tables_flushed_inlined);
+}
+
+vector<string> DetectConflicts(const SnapshotChangeInformation &source_changes,
+                               const SnapshotChangeInformation &target_changes) {
+	vector<string> conflicts;
+
+	CollectIndexConflicts(conflicts, source_changes.dropped_tables, target_changes.dropped_tables, "dropped table",
+	                      "drop-vs-drop");
+	CollectIndexConflicts(conflicts, source_changes.dropped_views, target_changes.dropped_views, "dropped view",
+	                      "drop-vs-drop");
+	CollectIndexConflicts(conflicts, source_changes.dropped_schemas, target_changes.dropped_schemas, "dropped schema",
+	                      "drop-vs-drop");
+	CollectIndexConflicts(conflicts, source_changes.dropped_scalar_macros, target_changes.dropped_scalar_macros,
+	                      "dropped macro", "drop-vs-drop");
+	CollectIndexConflicts(conflicts, source_changes.dropped_table_macros, target_changes.dropped_table_macros,
+	                      "dropped macro", "drop-vs-drop");
+
+	CollectNameConflicts(conflicts, source_changes.created_schemas, target_changes.created_schemas, "created schema");
+	CollectCreatedEntryConflicts(conflicts, source_changes.created_tables, target_changes.created_tables,
+	                             "created table/view");
+	CollectCreatedEntryConflicts(conflicts, source_changes.created_scalar_macros, target_changes.created_scalar_macros,
+	                             "created scalar macro");
+	CollectCreatedEntryConflicts(conflicts, source_changes.created_table_macros, target_changes.created_table_macros,
+	                             "created table macro");
+
+	// Schema-evolution / alter divergence on the same object
+	CollectIndexConflicts(conflicts, source_changes.altered_tables, target_changes.altered_tables, "altered table",
+	                      "schema-evolution divergence");
+	CollectIndexConflicts(conflicts, source_changes.altered_views, target_changes.altered_views, "altered view",
+	                      "schema-evolution divergence");
+
+	// Insert vs drop/alter/delete
+	CollectCrossConflicts(conflicts, source_changes.inserted_tables, target_changes.dropped_tables, "inserted into",
+	                      "dropped");
+	CollectCrossConflicts(conflicts, source_changes.inserted_tables, target_changes.altered_tables, "inserted into",
+	                      "altered");
+	CollectCrossConflicts(conflicts, source_changes.inserted_tables, target_changes.tables_deleted_from,
+	                      "inserted into", "deleted from");
+	CollectCrossConflicts(conflicts, target_changes.inserted_tables, source_changes.dropped_tables, "inserted into",
+	                      "dropped");
+	CollectCrossConflicts(conflicts, target_changes.inserted_tables, source_changes.altered_tables, "inserted into",
+	                      "altered");
+	CollectCrossConflicts(conflicts, target_changes.inserted_tables, source_changes.tables_deleted_from,
+	                      "inserted into", "deleted from");
+
+	CollectCrossConflicts(conflicts, source_changes.tables_inserted_inlined, target_changes.dropped_tables,
+	                      "inlined-inserted into", "dropped");
+	CollectCrossConflicts(conflicts, source_changes.tables_inserted_inlined, target_changes.altered_tables,
+	                      "inlined-inserted into", "altered");
+	CollectCrossConflicts(conflicts, target_changes.tables_inserted_inlined, source_changes.dropped_tables,
+	                      "inlined-inserted into", "dropped");
+	CollectCrossConflicts(conflicts, target_changes.tables_inserted_inlined, source_changes.altered_tables,
+	                      "inlined-inserted into", "altered");
+
+	// Delete vs alter/compact/insert (symmetric)
+	CollectCrossConflicts(conflicts, source_changes.tables_deleted_from, target_changes.dropped_tables, "deleted from",
+	                      "dropped");
+	CollectCrossConflicts(conflicts, source_changes.tables_deleted_from, target_changes.altered_tables, "deleted from",
+	                      "altered");
+	CollectCrossConflicts(conflicts, source_changes.tables_deleted_from, target_changes.tables_merge_adjacent,
+	                      "deleted from", "compacted");
+	CollectCrossConflicts(conflicts, source_changes.tables_deleted_from, target_changes.tables_rewrite_delete,
+	                      "deleted from", "compacted");
+	CollectCrossConflicts(conflicts, source_changes.tables_deleted_from, target_changes.inserted_tables, "deleted from",
+	                      "inserted into");
+	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.dropped_tables, "deleted from",
+	                      "dropped");
+	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.altered_tables, "deleted from",
+	                      "altered");
+	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.tables_merge_adjacent,
+	                      "deleted from", "compacted");
+	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.tables_rewrite_delete,
+	                      "deleted from", "compacted");
+	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.inserted_tables, "deleted from",
+	                      "inserted into");
+
+	// Overlapping deletes (conservative table-level; file-level would need metadata queries)
+	CollectIndexConflicts(conflicts, source_changes.tables_deleted_from, target_changes.tables_deleted_from,
+	                      "deleted from", "overlapping deletes");
+	CollectIndexConflicts(conflicts, source_changes.tables_deleted_inlined, target_changes.tables_deleted_inlined,
+	                      "inlined-deleted from", "overlapping inlined deletes");
+
+	// Compaction vs compaction / delete
+	CollectIndexConflicts(conflicts, source_changes.tables_merge_adjacent, target_changes.tables_merge_adjacent,
+	                      "compacted", "compaction-vs-compaction");
+	CollectIndexConflicts(conflicts, source_changes.tables_rewrite_delete, target_changes.tables_rewrite_delete,
+	                      "compacted", "compaction-vs-compaction");
+	CollectCrossConflicts(conflicts, source_changes.tables_merge_adjacent, target_changes.tables_deleted_from,
+	                      "compacted", "deleted from");
+	CollectCrossConflicts(conflicts, source_changes.tables_rewrite_delete, target_changes.tables_deleted_from,
+	                      "compacted", "deleted from");
+	CollectCrossConflicts(conflicts, target_changes.tables_merge_adjacent, source_changes.tables_deleted_from,
+	                      "compacted", "deleted from");
+	CollectCrossConflicts(conflicts, target_changes.tables_rewrite_delete, source_changes.tables_deleted_from,
+	                      "compacted", "deleted from");
+
+	// Alter vs drop
+	CollectCrossConflicts(conflicts, source_changes.altered_tables, target_changes.dropped_tables, "altered", "dropped");
+	CollectCrossConflicts(conflicts, target_changes.altered_tables, source_changes.dropped_tables, "altered", "dropped");
+	CollectCrossConflicts(conflicts, source_changes.altered_views, target_changes.dropped_views, "altered", "dropped");
+	CollectCrossConflicts(conflicts, target_changes.altered_views, source_changes.dropped_views, "altered", "dropped");
+
+	// Same-table double-append is intentionally NOT a conflict (compose semantics).
+	return conflicts;
+}
+
 } // namespace duckdb
