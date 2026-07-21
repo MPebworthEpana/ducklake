@@ -1,5 +1,5 @@
-# name: test/sql/branching/writable_branch_basic.test
-# description: Phase 2 M2 — branch-owned objects are invisible on main / siblings
+# name: test/sql/branching/writable_branch_isolation.test
+# description: Phase 2 — lineage isolation, delete-file visibility, ancestor mutation guards
 # group: [branching]
 
 require ducklake
@@ -11,13 +11,13 @@ test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_branch_iso')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_branch_iso', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 CREATE TABLE ducklake.base(i INTEGER);
 
 statement ok
-INSERT INTO ducklake.base VALUES (1);
+INSERT INTO ducklake.base VALUES (0), (1), (2), (3), (4);
 
 statement ok
 CALL ducklake_create_branch('ducklake', 'dev')
@@ -36,7 +36,19 @@ SELECT * FROM ducklake.only_on_dev
 ----
 hello
 
-# Main must not see the branch-only table (lineage isolation)
+# Branch delete of inherited rows must NOT leak to main
+statement ok
+DELETE FROM ducklake.base WHERE i = 2;
+
+query I
+SELECT * FROM ducklake.base ORDER BY i
+----
+0
+1
+3
+4
+
+# Main must not see the branch-only table
 statement ok con1
 CALL ducklake.use_branch('main')
 
@@ -45,31 +57,60 @@ SELECT * FROM ducklake.only_on_dev
 ----
 only_on_dev
 
+# Main still has all original rows, including the one deleted on the branch
 query I con1
 SELECT * FROM ducklake.base ORDER BY i
 ----
+0
 1
+2
+3
+4
 
 # Main can still advance independently
 statement ok con1
-INSERT INTO ducklake.base VALUES (2);
+INSERT INTO ducklake.base VALUES (50);
 
 query I con1
 SELECT * FROM ducklake.base ORDER BY i
 ----
+0
 1
 2
+3
+4
+50
 
-# Branch still sees inherited base (fork-point cap) plus its own table
+# Branch still sees fork-capped base (no row 50, no row 2) plus its own table
 statement ok
 CALL ducklake.use_branch('dev')
 
 query I
 SELECT * FROM ducklake.base ORDER BY i
 ----
+0
 1
+3
+4
 
 query I
 SELECT * FROM ducklake.only_on_dev
 ----
 hello
+
+# Dropping an inherited table on a branch must be refused (no tombstones yet)
+statement error
+DROP TABLE ducklake.base
+----
+inherited from another branch
+
+# Main still has every row (full scan, not stats)
+query I con1
+SELECT * FROM ducklake.base ORDER BY i
+----
+0
+1
+2
+3
+4
+50

@@ -134,6 +134,7 @@ void DuckLakeServerSideCommit::SetRetryConfigOverride(const DuckLakeRetryConfig 
 }
 
 DuckLakeServerSideCommitResult DuckLakeServerSideCommit::Run() {
+	supports_writable_branches = ReadSupportsWritableBranches();
 	ReadCommitHeader();
 	ReadColumnTypes();
 	ReadStagedDeleteFiles();
@@ -628,7 +629,9 @@ unique_ptr<DuckLakeTableStats> DuckLakeServerSideCommit::BuildTableStats(const D
 }
 
 void DuckLakeServerSideCommit::ReadExistingTableStats() {
-	string sql = StringUtil::Replace(DuckLakeMetadataManager::GlobalTableStatsQuery(), "{METADATA_CATALOG}", schema_id);
+	string sql = DuckLakeMetadataManager::GlobalTableStatsQuery();
+	DuckLakeSnapshot empty {};
+	sql = SubstitutePlaceholders(std::move(sql), empty);
 	auto result = RunQuery(sql, "read existing table stats");
 	auto global_stats = DuckLakeMetadataManager::ParseGlobalTableStats(*result);
 
@@ -643,6 +646,16 @@ bool DuckLakeServerSideCommit::ReadSupportsV1_1Metadata() {
 	auto result = RunQuery(sql, "read catalog version");
 	for (auto &row : *result) {
 		return DuckLakeVersionFromString(row.GetValue<string>(0)) >= DuckLakeVersion::V1_1_DEV_1;
+	}
+	return false;
+}
+
+bool DuckLakeServerSideCommit::ReadSupportsWritableBranches() {
+	string sql = StringUtil::Replace("SELECT value FROM {METADATA_CATALOG}.ducklake_metadata WHERE key = 'version'",
+	                                 "{METADATA_CATALOG}", schema_id);
+	auto result = RunQuery(sql, "read catalog version for writable branches");
+	for (auto &row : *result) {
+		return DuckLakeVersionFromString(row.GetValue<string>(0)) >= DuckLakeVersion::V1_1_DEV_3;
 	}
 	return false;
 }
@@ -728,6 +741,7 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 	ctx.commit_info = state->commit_info;
 	ctx.skip_drop_empty_inlined = true;
 	ctx.supports_v1_1_metadata = ReadSupportsV1_1Metadata();
+	ctx.supports_writable_branches = supports_writable_branches;
 	ctx.conflict_query_executor = [this](string q) -> unique_ptr<QueryResult> {
 		auto sql = SubstitutePlaceholders(std::move(q), transaction_snapshot);
 		return unique_ptr_cast<MaterializedQueryResult, QueryResult>(fresh_conn.Query(sql));
@@ -836,6 +850,8 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 }
 
 string DuckLakeServerSideCommit::SubstitutePlaceholders(string sql, const DuckLakeSnapshot &snapshot) const {
+	// Expand branch-aware fragments first (may insert {BRANCH_ID} / {SNAPSHOT_ID}).
+	DuckLakeMetadataManager::ExpandBranchAwarePlaceholders(sql, supports_writable_branches);
 	sql = StringUtil::Replace(sql, "{METADATA_CATALOG}", schema_id);
 	sql = StringUtil::Replace(sql, "{METADATA_CATALOG_NAME_LITERAL}", "(SELECT current_database())");
 	sql = StringUtil::Replace(sql, "{METADATA_SCHEMA_NAME_LITERAL}",
@@ -844,6 +860,7 @@ string DuckLakeServerSideCommit::SubstitutePlaceholders(string sql, const DuckLa
 	sql = StringUtil::Replace(sql, "{SCHEMA_VERSION}", std::to_string(snapshot.schema_version));
 	sql = StringUtil::Replace(sql, "{NEXT_CATALOG_ID}", std::to_string(snapshot.next_catalog_id));
 	sql = StringUtil::Replace(sql, "{NEXT_FILE_ID}", std::to_string(snapshot.next_file_id));
+	sql = StringUtil::Replace(sql, "{BRANCH_ID}", std::to_string(snapshot.branch_id));
 	return sql;
 }
 

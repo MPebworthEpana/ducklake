@@ -203,12 +203,13 @@ public:
 protected:
 	void SubstituteCatalogPlaceholders(string &query) const;
 	void SubstituteSnapshotPlaceholders(DuckLakeSnapshot snapshot, string &query) const;
-	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, and `{VISIBLE_*}` placeholders.
-	//! Must run before `{SNAPSHOT_ID}` / `{BRANCH_ID}` substitution.
-	static void ExpandBranchAwarePlaceholders(string &query, bool supports_writable_branches);
 
 public:
-	//! Classic begin/end snapshot interval predicate for `alias` (empty = unqualified columns).
+	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, `{BRANCH_STATS_FILTER}`, `{BRANCH_OWNED_FILTER}`,
+	//! `{BRANCH_ID_JOIN}`, and `{VISIBLE_*}` placeholders. Must run before `{SNAPSHOT_ID}` /
+	//! `{BRANCH_ID}` substitution.
+	static void ExpandBranchAwarePlaceholders(string &query, bool supports_writable_branches);
+	//! Classic begin/end snapshot interval predicate for `alias` (non-empty required).
 	static string ClassicIntervalVisibility(const string &alias);
 	//! Lineage + tombstone visibility for a versioned metadata row owned by `alias.branch_id`.
 	static string LineageIntervalVisibility(const string &alias, const string &object_id_column,
@@ -503,7 +504,8 @@ protected:
 
 private:
 	template <class T>
-	static string FlushDrop(const string &metadata_table_name, const string &id_name, const set<T> &dropped_entries);
+	static string FlushDrop(const string &metadata_table_name, const string &id_name, const set<T> &dropped_entries,
+	                        bool enforce_branch_ownership = true);
 	template <class T>
 	DuckLakeFileData ReadDataFile(DuckLakeTableEntry &table, T &row, idx_t &col_idx, bool is_encrypted);
 	template <class T>

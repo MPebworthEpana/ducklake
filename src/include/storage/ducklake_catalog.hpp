@@ -310,7 +310,7 @@ public:
 	void CacheInlinedDeletionTableResult(TableIndex table_id, DuckLakeSnapshot snapshot, bool exists);
 
 	//! Invalidate the cached table stats entry for a given stats cache key.
-	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id);
+	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0);
 	//! Invalidate the cached schema entry for a given schema_version.
 	void InvalidateSchemaCache(idx_t schema_version);
 	//! Invalidate a cached name map for a deleted mapping ID.
@@ -325,7 +325,7 @@ private:
 	//! Pin a schema cache entry for the duration of the current query to ensure safe memory access.
 	void PinSchemaForQuery(DuckLakeTransaction &transaction, shared_ptr<DuckLakeSchemaCacheEntry> entry);
 	void LoadNameMaps(DuckLakeTransaction &transaction);
-	string StatsCacheKey(idx_t next_file_id, TableIndex table_id) const;
+	string StatsCacheKey(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0) const;
 	string SchemaCacheKey(idx_t schema_version) const;
 	string SchemaPinStateKey() const;
 	ObjectCache &GetObjectCacheInstance();

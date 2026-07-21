@@ -595,10 +595,35 @@ void DuckLakeMetadataManager::DropRef(const string &ref_name, const string &ref_
 	if (!TryResolveRef(ref_name, ref_type, existing)) {
 		throw InvalidInputException("No %s named \"%s\" exists", ref_type, ref_name);
 	}
+	if (transaction.GetCatalog().SupportsWritableBranches() && ref_type == "branch") {
+		auto owned = Query(StringUtil::Format(
+		    "SELECT COUNT(*) FROM {METADATA_CATALOG}.ducklake_snapshot WHERE branch_id = %llu", existing.ref_id));
+		if (owned->HasError()) {
+			owned->GetErrorObject().Throw("Failed to check DuckLake branch ownership: ");
+		}
+		for (auto &row : *owned) {
+			if (row.GetValue<idx_t>(0) > 0) {
+				throw InvalidInputException(
+				    "Cannot drop branch \"%s\": it owns %llu snapshot(s). Branch drop with reclamation "
+				    "arrives in Phase 3.",
+				    ref_name, row.GetValue<idx_t>(0));
+			}
+		}
+	}
 	auto result = Execute(StringUtil::Format(
 	    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
+	}
+	if (transaction.GetCatalog().SupportsWritableBranches() && ref_type == "branch") {
+		auto cleanup = Execute(StringUtil::Format(
+		    R"(DELETE FROM {METADATA_CATALOG}.ducklake_branch_lineage WHERE branch_id = %llu;
+DELETE FROM {METADATA_CATALOG}.ducklake_table_stats WHERE branch_id = %llu;
+DELETE FROM {METADATA_CATALOG}.ducklake_table_column_stats WHERE branch_id = %llu;)",
+		    existing.ref_id, existing.ref_id, existing.ref_id));
+		if (cleanup->HasError()) {
+			cleanup->GetErrorObject().Throw("Failed to clean up DuckLake branch lineage: ");
+		}
 	}
 }
 
@@ -972,7 +997,7 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::BuildCatalogForSnapshot(
 	// load the schema information
 	auto result = query_executor(snapshot, R"(
 SELECT schema_id, schema_uuid::VARCHAR, schema_name, path, path_is_relative
-FROM {METADATA_CATALOG}.ducklake_schema
+FROM {METADATA_CATALOG}.ducklake_schema sch
 WHERE {VISIBLE_SCHEMA}
 )");
 	if (result->HasError()) {
@@ -1373,12 +1398,14 @@ string DuckLakeMetadataManager::GlobalTableStatsQuery() {
 	// %llu` - the server-side commit path (DuckLakeServerSideCommit::ReadExistingTableStats) executes
 	// the returned SQL verbatim, so a stray %llu would reach the parser and fail every server-side
 	// commit. The single-table GetGlobalTableStats() below keeps its own StringUtil::Format query.
+	// {BRANCH_STATS_FILTER} is expanded by ExpandBranchAwarePlaceholders (empty on pre-1.1-dev3).
 	return R"(
 SELECT table_id, column_id, record_count, next_row_id, file_size_bytes, contains_null, contains_nan, min_value, max_value, extra_stats
 FROM {METADATA_CATALOG}.ducklake_table_stats
-LEFT JOIN {METADATA_CATALOG}.ducklake_table_column_stats USING (table_id)
+LEFT JOIN {METADATA_CATALOG}.ducklake_table_column_stats USING (table_id{BRANCH_ID_JOIN})
 WHERE record_count IS NOT NULL
   AND file_size_bytes IS NOT NULL
+  {BRANCH_STATS_FILTER}
 ORDER BY table_id;
 )";
 }
@@ -1392,10 +1419,11 @@ vector<DuckLakeGlobalStatsInfo> DuckLakeMetadataManager::GetGlobalTableStats(Duc
 	string query = StringUtil::Format(R"(
 SELECT table_id, column_id, record_count, next_row_id, file_size_bytes, contains_null, contains_nan, min_value, max_value, extra_stats
 FROM {METADATA_CATALOG}.ducklake_table_stats
-LEFT JOIN {METADATA_CATALOG}.ducklake_table_column_stats USING (table_id)
+LEFT JOIN {METADATA_CATALOG}.ducklake_table_column_stats USING (table_id{BRANCH_ID_JOIN})
 WHERE table_id = %llu
   AND record_count IS NOT NULL
   AND file_size_bytes IS NOT NULL
+  {BRANCH_STATS_FILTER}
 ORDER BY table_id;
 )",
 	                                  table_id.index);
@@ -2137,8 +2165,8 @@ FROM {METADATA_CATALOG}.ducklake_data_file data
 %s
 LEFT JOIN (
     SELECT *
-    FROM {METADATA_CATALOG}.ducklake_delete_file
-    WHERE table_id=%d AND {VISIBLE_DELETE_FILE}
+    FROM {METADATA_CATALOG}.ducklake_delete_file df
+    WHERE df.table_id=%d AND {VISIBLE_DELETE_FILE}
     ) del ON del.data_file_id = data.data_file_id
 WHERE data.table_id=%d AND {VISIBLE_DATA_FILE}
 		)",
@@ -2492,8 +2520,8 @@ SELECT data.data_file_id, del.delete_file_id, data.record_count, %s
 FROM {METADATA_CATALOG}.ducklake_data_file data
 LEFT JOIN (
 	SELECT *
-    FROM {METADATA_CATALOG}.ducklake_delete_file
-    WHERE table_id=%d AND {VISIBLE_DELETE_FILE}
+    FROM {METADATA_CATALOG}.ducklake_delete_file df
+    WHERE df.table_id=%d AND {VISIBLE_DELETE_FILE}
     ) del USING (data_file_id)
 WHERE data.table_id=%d AND {VISIBLE_DATA_FILE}
 		)",
@@ -2727,41 +2755,55 @@ string GenerateIDList(const set<T> &dropped_entries) {
 
 template <class T>
 string DuckLakeMetadataManager::FlushDrop(const string &metadata_table_name, const string &id_name,
-                                          const set<T> &dropped_entries) {
+                                          const set<T> &dropped_entries, bool enforce_branch_ownership) {
 	if (dropped_entries.empty()) {
 		return {};
 	}
 	auto dropped_id_list = GenerateIDList(dropped_entries);
 
-	return StringUtil::Format(
-	    R"(UPDATE {METADATA_CATALOG}.%s SET end_snapshot = {SNAPSHOT_ID} WHERE end_snapshot IS NULL AND %s IN (%s);)",
-	    metadata_table_name, id_name, dropped_id_list);
+	string batch;
+	if (enforce_branch_ownership) {
+		// Refuse end-dating rows owned by another branch (inherited objects) until M3 tombstones.
+		batch += StringUtil::Format(
+		    R"(SELECT error('Cannot drop or alter objects inherited from another branch until branch deletion records (Phase 2 M3) are implemented')
+WHERE EXISTS (
+	SELECT 1 FROM {METADATA_CATALOG}.%s
+	WHERE end_snapshot IS NULL AND %s IN (%s) AND branch_id != {BRANCH_ID}
+);)",
+		    metadata_table_name, id_name, dropped_id_list);
+	}
+	batch += StringUtil::Format(
+	    R"(UPDATE {METADATA_CATALOG}.%s SET end_snapshot = {SNAPSHOT_ID} WHERE end_snapshot IS NULL AND %s IN (%s)%s;)",
+	    metadata_table_name, id_name, dropped_id_list,
+	    enforce_branch_ownership ? "{BRANCH_OWNED_FILTER}" : "");
+	return batch;
 }
 
 string DuckLakeMetadataManager::DropSchemas(const set<SchemaIndex> &ids) {
-	return FlushDrop("ducklake_schema", "schema_id", ids);
+	return FlushDrop("ducklake_schema", "schema_id", ids, true);
 }
 
 string DuckLakeMetadataManager::DropTables(const set<TableIndex> &ids, bool renamed) {
-	string batch_query = FlushDrop("ducklake_table", "table_id", ids);
+	string batch_query = FlushDrop("ducklake_table", "table_id", ids, true);
 	if (renamed == false) {
-		batch_query += FlushDrop("ducklake_partition_info", "table_id", ids);
-		batch_query += FlushDrop("ducklake_column", "table_id", ids);
-		batch_query += FlushDrop("ducklake_column_tag", "table_id", ids);
-		batch_query += FlushDrop("ducklake_data_file", "table_id", ids);
-		batch_query += FlushDrop("ducklake_delete_file", "table_id", ids);
-		batch_query += FlushDrop("ducklake_tag", "object_id", ids);
-		batch_query += FlushDrop("ducklake_sort_info", "table_id", ids);
+		batch_query += FlushDrop("ducklake_partition_info", "table_id", ids, true);
+		batch_query += FlushDrop("ducklake_column", "table_id", ids, true);
+		// Tags have no branch_id column; end-dating them is scoped by the parent table drop above.
+		batch_query += FlushDrop("ducklake_column_tag", "table_id", ids, false);
+		batch_query += FlushDrop("ducklake_data_file", "table_id", ids, true);
+		batch_query += FlushDrop("ducklake_delete_file", "table_id", ids, true);
+		batch_query += FlushDrop("ducklake_tag", "object_id", ids, false);
+		batch_query += FlushDrop("ducklake_sort_info", "table_id", ids, true);
 	}
 	return batch_query;
 }
 
 string DuckLakeMetadataManager::DropViews(const set<TableIndex> &ids, bool renamed, bool drop_view_column_tags) {
-	string batch_query = FlushDrop("ducklake_view", "view_id", ids);
+	string batch_query = FlushDrop("ducklake_view", "view_id", ids, true);
 	if (!renamed) {
-		batch_query += FlushDrop("ducklake_tag", "object_id", ids);
+		batch_query += FlushDrop("ducklake_tag", "object_id", ids, false);
 		if (drop_view_column_tags) {
-			batch_query += FlushDrop("ducklake_view_column_tag", "view_id", ids);
+			batch_query += FlushDrop("ducklake_view_column_tag", "view_id", ids, false);
 		}
 	}
 	return batch_query;
@@ -2787,7 +2829,8 @@ void DuckLakeMetadataManager::SubstituteCatalogPlaceholders(string &query) const
 }
 
 string DuckLakeMetadataManager::ClassicIntervalVisibility(const string &alias) {
-	string prefix = alias.empty() ? "" : alias + ".";
+	D_ASSERT(!alias.empty());
+	string prefix = alias + ".";
 	return StringUtil::Format(
 	    "{SNAPSHOT_ID} >= %sbegin_snapshot AND ({SNAPSHOT_ID} < %send_snapshot OR %send_snapshot IS NULL)", prefix,
 	    prefix, prefix);
@@ -2795,7 +2838,11 @@ string DuckLakeMetadataManager::ClassicIntervalVisibility(const string &alias) {
 
 string DuckLakeMetadataManager::LineageIntervalVisibility(const string &alias, const string &object_id_column,
                                                           const string &deletion_table) {
-	string prefix = alias.empty() ? "" : alias + ".";
+	if (alias.empty()) {
+		throw InternalException("LineageIntervalVisibility requires a non-empty table alias "
+		                        "(unqualified branch_id binds incorrectly inside EXISTS subqueries)");
+	}
+	string prefix = alias + ".";
 	string visible = StringUtil::Format(
 	    R"(EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage __dl_lin
@@ -2823,9 +2870,11 @@ void DuckLakeMetadataManager::ExpandBranchAwarePlaceholders(string &query, bool 
 	if (supports_writable_branches) {
 		query = StringUtil::Replace(query, "{BRANCH_ID_COL}", ", branch_id");
 		query = StringUtil::Replace(query, "{BRANCH_ID_VAL}", ", {BRANCH_ID}");
+		query = StringUtil::Replace(query, "{BRANCH_ID_JOIN}", ", branch_id");
 		query = StringUtil::Replace(query, "{BRANCH_STATS_FILTER}", " AND branch_id = {BRANCH_ID}");
+		query = StringUtil::Replace(query, "{BRANCH_OWNED_FILTER}", " AND branch_id = {BRANCH_ID}");
 		query = StringUtil::Replace(query, "{VISIBLE_SCHEMA}",
-		                            LineageIntervalVisibility("", "schema_id", "ducklake_deletion_schema"));
+		                            LineageIntervalVisibility("sch", "schema_id", "ducklake_deletion_schema"));
 		query = StringUtil::Replace(query, "{VISIBLE_TABLE}",
 		                            LineageIntervalVisibility("tbl", "table_id", "ducklake_deletion_table"));
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN}",
@@ -2842,15 +2891,17 @@ void DuckLakeMetadataManager::ExpandBranchAwarePlaceholders(string &query, bool 
 		                            LineageIntervalVisibility("data", "data_file_id", "ducklake_deletion_data_file"));
 		query = StringUtil::Replace(
 		    query, "{VISIBLE_DELETE_FILE}",
-		    LineageIntervalVisibility("", "delete_file_id", "ducklake_deletion_delete_file"));
+		    LineageIntervalVisibility("df", "delete_file_id", "ducklake_deletion_delete_file"));
 		query = StringUtil::Replace(query, "{VISIBLE_TAG}", ClassicIntervalVisibility("tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN_TAG}", ClassicIntervalVisibility("col_tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_VIEW_COLUMN_TAG}", ClassicIntervalVisibility("vct"));
 	} else {
 		query = StringUtil::Replace(query, "{BRANCH_ID_COL}", "");
 		query = StringUtil::Replace(query, "{BRANCH_ID_VAL}", "");
+		query = StringUtil::Replace(query, "{BRANCH_ID_JOIN}", "");
 		query = StringUtil::Replace(query, "{BRANCH_STATS_FILTER}", "");
-		query = StringUtil::Replace(query, "{VISIBLE_SCHEMA}", ClassicIntervalVisibility(""));
+		query = StringUtil::Replace(query, "{BRANCH_OWNED_FILTER}", "");
+		query = StringUtil::Replace(query, "{VISIBLE_SCHEMA}", ClassicIntervalVisibility("sch"));
 		query = StringUtil::Replace(query, "{VISIBLE_TABLE}", ClassicIntervalVisibility("tbl"));
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN}", ClassicIntervalVisibility("col"));
 		query = StringUtil::Replace(query, "{VISIBLE_VIEW}", ClassicIntervalVisibility("view"));
@@ -2858,7 +2909,7 @@ void DuckLakeMetadataManager::ExpandBranchAwarePlaceholders(string &query, bool 
 		query = StringUtil::Replace(query, "{VISIBLE_PARTITION}", ClassicIntervalVisibility("part"));
 		query = StringUtil::Replace(query, "{VISIBLE_SORT}", ClassicIntervalVisibility("sort"));
 		query = StringUtil::Replace(query, "{VISIBLE_DATA_FILE}", ClassicIntervalVisibility("data"));
-		query = StringUtil::Replace(query, "{VISIBLE_DELETE_FILE}", ClassicIntervalVisibility(""));
+		query = StringUtil::Replace(query, "{VISIBLE_DELETE_FILE}", ClassicIntervalVisibility("df"));
 		query = StringUtil::Replace(query, "{VISIBLE_TAG}", ClassicIntervalVisibility("tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN_TAG}", ClassicIntervalVisibility("col_tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_VIEW_COLUMN_TAG}", ClassicIntervalVisibility("vct"));
@@ -2913,7 +2964,7 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &&query) {
 }
 
 string DuckLakeMetadataManager::DropMacros(const set<MacroIndex> &ids) {
-	return FlushDrop("ducklake_macro", "macro_id", ids);
+	return FlushDrop("ducklake_macro", "macro_id", ids, true);
 }
 string DuckLakeMetadataManager::WriteNewSchemas(const vector<DuckLakeSchemaInfo> &new_schemas,
                                                 const vector<DuckLakePath> &resolved_paths) {
@@ -3229,7 +3280,7 @@ VALUES %s
 UPDATE {METADATA_CATALOG}.ducklake_column
 SET end_snapshot = {SNAPSHOT_ID}
 FROM dropped_cols
-WHERE table_id=tid AND column_id=cid AND end_snapshot IS NULL
+WHERE table_id=tid AND column_id=cid AND end_snapshot IS NULL{BRANCH_OWNED_FILTER}
 ;)",
 	                          dropped_cols);
 }
@@ -4447,11 +4498,11 @@ string DuckLakeMetadataManager::WriteNewDataFilesSqlBatch(const vector<DuckLakeF
 }
 
 string DuckLakeMetadataManager::DropDataFiles(const set<DataFileIndex> &dropped_files) {
-	return FlushDrop("ducklake_data_file", "data_file_id", dropped_files);
+	return FlushDrop("ducklake_data_file", "data_file_id", dropped_files, true);
 }
 
 string DuckLakeMetadataManager::DropDeleteFiles(const set<DataFileIndex> &dropped_files) {
-	return FlushDrop("ducklake_delete_file", "data_file_id", dropped_files);
+	return FlushDrop("ducklake_delete_file", "data_file_id", dropped_files, true);
 }
 
 string
@@ -4777,14 +4828,35 @@ unique_ptr<DuckLakeSnapshot> DuckLakeMetadataManager::GetSnapshot(BoundAtClause 
 	const string timestamp_order = bound == SnapshotBound::LOWER_BOUND ? "ASC" : "DESC";
 	const string timestamp_condition = bound == SnapshotBound::LOWER_BOUND ? ">" : "<";
 	if (StringUtil::CIEquals(unit, "version")) {
-		result = Query(StringUtil::Format(R"(
+		if (transaction.GetCatalog().SupportsWritableBranches()) {
+			result = Query(StringUtil::Format(R"(
+SELECT snapshot_id, schema_version, next_catalog_id, next_file_id, COALESCE(branch_id, 0)
+FROM {METADATA_CATALOG}.ducklake_snapshot
+WHERE snapshot_id = %llu;)",
+			                                  val.DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>()));
+		} else {
+			result = Query(StringUtil::Format(R"(
 SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
 FROM {METADATA_CATALOG}.ducklake_snapshot
 WHERE snapshot_id = %llu;)",
-		                                  val.DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>()));
+			                                  val.DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>()));
+		}
 	} else if (StringUtil::CIEquals(unit, "timestamp")) {
-		result = Query(StringUtil::Format(
-		    R"(
+		if (transaction.GetCatalog().SupportsWritableBranches()) {
+			result = Query(StringUtil::Format(
+			    R"(
+SELECT snapshot_id, schema_version, next_catalog_id, next_file_id, COALESCE(branch_id, 0)
+FROM {METADATA_CATALOG}.ducklake_snapshot
+WHERE snapshot_id = (
+	SELECT snapshot_id
+	FROM {METADATA_CATALOG}.ducklake_snapshot
+	WHERE snapshot_time::TIMESTAMPTZ %s= %s
+	ORDER BY snapshot_time::TIMESTAMPTZ %s
+	LIMIT 1);)",
+			    timestamp_condition, val.DefaultCastAs(LogicalType::VARCHAR).ToSQLString(), timestamp_order));
+		} else {
+			result = Query(StringUtil::Format(
+			    R"(
 SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
 FROM {METADATA_CATALOG}.ducklake_snapshot
 WHERE snapshot_id = (
@@ -4793,7 +4865,8 @@ WHERE snapshot_id = (
 	WHERE snapshot_time::TIMESTAMPTZ %s= %s
 	ORDER BY snapshot_time::TIMESTAMPTZ %s
 	LIMIT 1);)",
-		    timestamp_condition, val.DefaultCastAs(LogicalType::VARCHAR).ToSQLString(), timestamp_order));
+			    timestamp_condition, val.DefaultCastAs(LogicalType::VARCHAR).ToSQLString(), timestamp_order));
+		}
 	} else if (StringUtil::CIEquals(unit, "branch") || StringUtil::CIEquals(unit, "tag")) {
 		// Resolve named ref → snapshot_id. For writable branches, also load branch_id for lineage reads.
 		auto ref_type = StringUtil::Lower(unit);
@@ -4828,8 +4901,7 @@ WHERE lower(r.ref_name) = lower(%s) AND r.ref_type = %s AND r.status = 'active';
 		}
 		snapshot = make_uniq<DuckLakeSnapshot>(row.GetValue<idx_t>(0), row.GetValue<idx_t>(1), row.GetValue<idx_t>(2),
 		                                       row.GetValue<idx_t>(3));
-		if (transaction.GetCatalog().SupportsWritableBranches() && StringUtil::CIEquals(unit, "branch") &&
-		    result->ColumnCount() > 4 && !row.IsNull(4)) {
+		if (transaction.GetCatalog().SupportsWritableBranches() && result->ColumnCount() > 4 && !row.IsNull(4)) {
 			snapshot->branch_id = row.GetValue<idx_t>(4);
 		}
 	}

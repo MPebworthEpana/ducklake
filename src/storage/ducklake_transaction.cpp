@@ -1563,24 +1563,27 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		// CAS against whatever is currently stored on the ref.
 		idx_t expected_head = HasActiveBranch() ? GetActiveBranchHeadSnapshot() : DConstants::INVALID_INDEX;
 		context.advance_branch_head = [this, branch_ref_id, expected_head](idx_t new_snapshot_id) {
+			// Re-read the head on every attempt so OCC retries after a concurrent same-branch
+			// commit can succeed. Conflict checking already validated logical safety.
 			idx_t cas_expected = expected_head;
-			if (cas_expected == DConstants::INVALID_INDEX) {
-				DuckLakeRefInfo main_ref;
-				if (!metadata_manager->TryResolveRef("main", "branch", main_ref) ||
-				    main_ref.ref_id != branch_ref_id) {
-					// Fall back: read current head by ref_id
-					auto q = metadata_manager->Query(StringUtil::Format(
-					    "SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu", branch_ref_id));
-					if (q->HasError()) {
-						q->GetErrorObject().Throw("Failed to read branch head: ");
-					}
-					for (auto &row : *q) {
-						cas_expected = row.GetValue<idx_t>(0);
-					}
-				} else {
-					cas_expected = main_ref.snapshot_id;
-				}
+			DuckLakeRefInfo current;
+			auto q = metadata_manager->Query(StringUtil::Format(
+			    "SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu AND "
+			    "ref_type = 'branch' AND status = 'active'",
+			    branch_ref_id));
+			if (q->HasError()) {
+				q->GetErrorObject().Throw("Failed to read branch head: ");
 			}
+			bool found = false;
+			for (auto &row : *q) {
+				cas_expected = row.GetValue<idx_t>(0);
+				found = true;
+			}
+			if (!found) {
+				throw TransactionException("Transaction conflict - branch ref %llu disappeared during commit",
+				                           branch_ref_id);
+			}
+			(void)expected_head; // retained for readability of first-attempt intent
 			metadata_manager->UpdateBranchHead(branch_ref_id, cas_expected, new_snapshot_id);
 			if (HasActiveBranch()) {
 				auto client = this->context.lock();
