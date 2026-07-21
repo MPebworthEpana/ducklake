@@ -20,7 +20,10 @@ statement ok
 INSERT INTO ducklake.t VALUES (1);
 
 statement ok
-CALL ducklake_create_tag('ducklake', 'before_second', snapshot_version => (SELECT max(snapshot_id) FROM ducklake.snapshots()))
+SET VARIABLE tag_snap = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok
+CALL ducklake_create_tag('ducklake', 'before_second', snapshot_version => getvariable('tag_snap'))
 
 statement ok
 INSERT INTO ducklake.t VALUES (2);

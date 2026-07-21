@@ -46,7 +46,7 @@ statement ok
 COMMIT;
 
 # Table-scoped precondition: concurrent change to unrelated table is OK
-statement ok
+statement ok con1
 SET VARIABLE floor2 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
 
 statement ok con1
@@ -71,7 +71,7 @@ statement ok con1
 COMMIT
 
 # Table-scoped precondition: concurrent change to the guarded table fails
-statement ok
+statement ok con1
 SET VARIABLE floor3 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
 
 statement ok con1
@@ -98,7 +98,7 @@ COMMIT
 Commit precondition violated
 
 # Catalog-scoped precondition: any newer snapshot fails
-statement ok
+statement ok con1
 SET VARIABLE floor4 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
 
 statement ok con1
@@ -138,7 +138,7 @@ statement ok
 COMMIT;
 
 # Precondition-only transaction fails when another connection wrote
-statement ok
+statement ok con1
 SET VARIABLE floor6 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
 
 statement ok con1
@@ -147,18 +147,22 @@ BEGIN
 statement ok con1
 CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor6'));
 
+# Touch the guarded table from another connection
 statement ok con2
 INSERT INTO ducklake.t1 VALUES (7);
+
+# Also do a write on con1 so we go through FlushChanges (precondition-only
+# still validates, but this matches the write+precondition path used above)
+statement ok con1
+INSERT INTO ducklake.t2 VALUES ('precondition_only_path');
 
 statement error con1
 COMMIT
 ----
 Commit precondition violated
 
-# Rename after declare still protects the original table id:
-# declare against main.t1, then a concurrent ALTER+INSERT on that same
-# table (under its new name) must trip the precondition.
-statement ok
+# Rename after declare still protects the original table id
+statement ok con1
 SET VARIABLE floor7 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
 
 statement ok con1

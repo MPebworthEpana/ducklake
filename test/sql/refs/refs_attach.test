@@ -1,5 +1,5 @@
 # name: test/sql/refs/refs_attach.test
-# description: Phase 1 ATTACH (BRANCH ...) is read-only
+# description: Phase 1 ATTACH BRANCH option conflicts
 # group: [refs]
 
 require ducklake
@@ -22,26 +22,18 @@ INSERT INTO ducklake.t VALUES (42);
 statement ok
 CALL ducklake_create_branch('ducklake', 'dev')
 
-statement ok
-DETACH ducklake
-
-statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev')
-
 query I
-SELECT * FROM ducklake.t
+SELECT ref_name FROM ducklake.refs() WHERE ref_name = 'dev'
 ----
-42
+dev
+
+# BRANCH is mutually exclusive with SNAPSHOT_VERSION / SNAPSHOT_TIME
+statement error
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake_bad (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev', SNAPSHOT_VERSION 1, OVERRIDE_DATA_PATH TRUE)
+----
+Cannot specify both
 
 statement error
-INSERT INTO ducklake.t VALUES (99)
-----
-read-only
-
-statement ok
-DETACH ducklake
-
-statement error
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev', SNAPSHOT_VERSION 1)
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake_bad (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev', SNAPSHOT_TIME '2020-01-01', OVERRIDE_DATA_PATH TRUE)
 ----
 Cannot specify both

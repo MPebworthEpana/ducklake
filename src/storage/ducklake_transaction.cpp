@@ -1583,7 +1583,10 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 			}
 			metadata_manager->UpdateBranchHead(branch_ref_id, cas_expected, new_snapshot_id);
 			if (HasActiveBranch()) {
-				active_branch_head_snapshot = new_snapshot_id;
+				auto client = this->context.lock();
+				if (client) {
+					ducklake_catalog.SetSessionBranchHead(*client, new_snapshot_id);
+				}
 			}
 		};
 	}
@@ -1618,9 +1621,11 @@ const vector<CommitPrecondition> &DuckLakeTransaction::GetCommitPreconditions() 
 }
 
 void DuckLakeTransaction::SetActiveBranch(idx_t branch_id, const string &branch_name, idx_t head_snapshot_id) {
-	active_branch_id = branch_id;
-	active_branch_name = branch_name;
-	active_branch_head_snapshot = head_snapshot_id;
+	auto context_ref = context.lock();
+	if (!context_ref) {
+		throw InternalException("DuckLakeTransaction::SetActiveBranch called without a client context");
+	}
+	ducklake_catalog.SetSessionBranch(*context_ref, branch_id, branch_name, head_snapshot_id);
 	// Reset cached snapshot so subsequent reads/writes use the branch head.
 	lock_guard<mutex> guard(snapshot_lock);
 	snapshot.reset();
@@ -1628,19 +1633,23 @@ void DuckLakeTransaction::SetActiveBranch(idx_t branch_id, const string &branch_
 }
 
 bool DuckLakeTransaction::HasActiveBranch() const {
-	return active_branch_id.IsValid();
+	auto context_ref = context.lock();
+	return context_ref && ducklake_catalog.HasSessionBranch(*context_ref);
 }
 
 idx_t DuckLakeTransaction::GetActiveBranchId() const {
-	return active_branch_id.IsValid() ? active_branch_id.GetIndex() : 0;
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchId(*context_ref) : 0;
 }
 
-const string &DuckLakeTransaction::GetActiveBranchName() const {
-	return active_branch_name;
+string DuckLakeTransaction::GetActiveBranchName() const {
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchName(*context_ref) : string();
 }
 
 idx_t DuckLakeTransaction::GetActiveBranchHeadSnapshot() const {
-	return active_branch_head_snapshot;
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchHeadSnapshot(*context_ref) : 0;
 }
 
 static bool SnapshotChangeTouchesTable(const SnapshotChangeInformation &changes, TableIndex table_id) {

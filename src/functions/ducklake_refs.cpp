@@ -19,14 +19,16 @@ static idx_t ResolveSnapshotForRef(ClientContext &context, Catalog &catalog, Tab
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	auto version_entry = input.named_parameters.find("snapshot_version");
 	auto time_entry = input.named_parameters.find("snapshot_time");
-	if (version_entry != input.named_parameters.end() && time_entry != input.named_parameters.end()) {
+	bool has_version = version_entry != input.named_parameters.end() && !version_entry->second.IsNull();
+	bool has_time = time_entry != input.named_parameters.end() && !time_entry->second.IsNull();
+	if (has_version && has_time) {
 		throw BinderException("Cannot specify both snapshot_version and snapshot_time");
 	}
-	if (version_entry != input.named_parameters.end() && !version_entry->second.IsNull()) {
+	if (has_version) {
 		BoundAtClause at("version", version_entry->second.DefaultCastAs(LogicalType::BIGINT));
 		return transaction.GetSnapshot(&at).snapshot_id;
 	}
-	if (time_entry != input.named_parameters.end() && !time_entry->second.IsNull()) {
+	if (has_time) {
 		BoundAtClause at("timestamp", time_entry->second.DefaultCastAs(LogicalType::TIMESTAMP_TZ));
 		return transaction.GetSnapshot(&at).snapshot_id;
 	}

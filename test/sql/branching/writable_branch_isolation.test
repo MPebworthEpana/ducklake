@@ -1,5 +1,5 @@
 # name: test/sql/branching/writable_branch_basic.test
-# description: Phase 2 M1 — writable branch create + use_branch + isolated inserts
+# description: Phase 2 M2 — branch-owned objects are invisible on main / siblings
 # group: [branching]
 
 require ducklake
@@ -11,7 +11,7 @@ test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_branch_basic')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_branch_iso')
 
 statement ok
 CREATE TABLE ducklake.base(i INTEGER);
@@ -22,13 +22,6 @@ INSERT INTO ducklake.base VALUES (1);
 statement ok
 CALL ducklake_create_branch('ducklake', 'dev')
 
-query II
-SELECT ref_name, snapshot_id >= 0 FROM ducklake.refs() WHERE ref_type = 'branch' ORDER BY ref_name
-----
-dev	true
-main	true
-
-# Switch to the branch and create a new table there
 statement ok
 CALL ducklake.use_branch('dev')
 
@@ -43,26 +36,40 @@ SELECT * FROM ducklake.only_on_dev
 ----
 hello
 
-# Branch head advanced
-query I
-SELECT snapshot_id > 0 FROM ducklake.refs() WHERE ref_name = 'dev'
-----
-true
-
-# Concurrent work on main should not conflict with the branch
+# Main must not see the branch-only table (lineage isolation)
 statement ok con1
 CALL ducklake.use_branch('main')
 
+statement error con1
+SELECT * FROM ducklake.only_on_dev
+----
+only_on_dev
+
+query I con1
+SELECT * FROM ducklake.base ORDER BY i
+----
+1
+
+# Main can still advance independently
 statement ok con1
 INSERT INTO ducklake.base VALUES (2);
 
 query I con1
-SELECT count(*) FROM ducklake.base
-----
-2
-
-# Default connection is still on `dev` — sees fork-capped base, not main's new row
-query I
-SELECT count(*) FROM ducklake.base
+SELECT * FROM ducklake.base ORDER BY i
 ----
 1
+2
+
+# Branch still sees inherited base (fork-point cap) plus its own table
+statement ok
+CALL ducklake.use_branch('dev')
+
+query I
+SELECT * FROM ducklake.base ORDER BY i
+----
+1
+
+query I
+SELECT * FROM ducklake.only_on_dev
+----
+hello

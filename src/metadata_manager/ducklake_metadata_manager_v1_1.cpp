@@ -4,6 +4,7 @@
 #include "metadata_manager/quack_metadata_manager.hpp"
 #include "common/ducklake_version.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_transaction.hpp"
 
 namespace duckdb {
 

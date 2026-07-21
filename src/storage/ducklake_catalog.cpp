@@ -1115,4 +1115,60 @@ ObjectCache &DuckLakeCatalog::GetObjectCacheInstance() {
 	return GetDatabase().GetObjectCache();
 }
 
+void DuckLakeCatalog::SetSessionBranch(ClientContext &context, idx_t branch_id, const string &branch_name,
+                                       idx_t head_snapshot_id) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	state->branch_id = branch_id;
+	state->branch_name = branch_name;
+	state->head_snapshot_id = head_snapshot_id;
+}
+
+void DuckLakeCatalog::ClearSessionBranch(ClientContext &context) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	state->branch_id = optional_idx();
+	state->branch_name.clear();
+	state->head_snapshot_id = 0;
+}
+
+void DuckLakeCatalog::SetSessionBranchHead(ClientContext &context, idx_t head_snapshot_id) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	if (state->branch_id.IsValid()) {
+		state->head_snapshot_id = head_snapshot_id;
+	}
+}
+
+bool DuckLakeCatalog::HasSessionBranch(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state && state->branch_id.IsValid();
+}
+
+idx_t DuckLakeCatalog::GetSessionBranchId(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	if (!state || !state->branch_id.IsValid()) {
+		return 0;
+	}
+	return state->branch_id.GetIndex();
+}
+
+string DuckLakeCatalog::GetSessionBranchName(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state ? state->branch_name : string();
+}
+
+idx_t DuckLakeCatalog::GetSessionBranchHeadSnapshot(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state ? state->head_snapshot_id : 0;
+}
+
+string DuckLakeCatalog::BranchSessionStateKey() const {
+	return StringUtil::Format("ducklake_branch_session:%s:%s:%s", GetName(), MetadataPath(), instance_id);
+}
+
 } // namespace duckdb

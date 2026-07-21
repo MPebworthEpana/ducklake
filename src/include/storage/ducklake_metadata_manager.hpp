@@ -203,12 +203,22 @@ public:
 protected:
 	void SubstituteCatalogPlaceholders(string &query) const;
 	void SubstituteSnapshotPlaceholders(DuckLakeSnapshot snapshot, string &query) const;
+	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, and `{VISIBLE_*}` placeholders.
+	//! Must run before `{SNAPSHOT_ID}` / `{BRANCH_ID}` substitution.
+	static void ExpandBranchAwarePlaceholders(string &query, bool supports_writable_branches);
 
 public:
+	//! Classic begin/end snapshot interval predicate for `alias` (empty = unqualified columns).
+	static string ClassicIntervalVisibility(const string &alias);
+	//! Lineage + tombstone visibility for a versioned metadata row owned by `alias.branch_id`.
+	static string LineageIntervalVisibility(const string &alias, const string &object_id_column,
+	                                        const string &deletion_table);
 	//! Pure SQL templates (use `{METADATA_CATALOG}` placeholder) — caller substitutes + executes.
 	//! Both used by the regular metadata-manager methods and by server-side commit, which runs the
 	//! SQL on a fresh Connection without going through the metadata-manager wrapper.
 	static string LatestSnapshotQuery();
+	//! Latest snapshot for the `main` branch head (Phase 2). Falls back to global MAX when refs absent.
+	static string MainBranchSnapshotQuery();
 	static string GlobalTableStatsQuery();
 	//! Pure parsers for the results of the above queries.
 	static unique_ptr<DuckLakeSnapshot> ParseSnapshot(QueryResult &result);

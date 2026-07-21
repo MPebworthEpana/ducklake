@@ -1,0 +1,39 @@
+diff --git a/src/include/duckdb/parser/peg/inlined_grammar.gram b/src/include/duckdb/parser/peg/inlined_grammar.gram
+index 974e7ffb28..65e43ae3a2 100644
+--- a/src/include/duckdb/parser/peg/inlined_grammar.gram
++++ b/src/include/duckdb/parser/peg/inlined_grammar.gram
+@@ -1394,7 +1394,7 @@ TableAliasWithoutAs <- Identifier ColumnAliases?
+ 
+ AtClause <- 'AT' Parens(AtSpecifier)
+ AtSpecifier <- AtUnit '=>' Expression
+-AtUnit <- 'VERSION' / 'TIMESTAMP'
++AtUnit <- 'VERSION' / 'TIMESTAMP' / 'BRANCH' / 'TAG'
+ 
+ JoinClause <- RegularJoinClause / JoinWithoutOnClause
+ RegularJoinClause <- 'ASOF'? JoinType? 'JOIN' TableRef JoinQualifier
+diff --git a/src/include/duckdb/parser/peg/inlined_grammar.hpp b/src/include/duckdb/parser/peg/inlined_grammar.hpp
+index 50507a22fc..e95475fba7 100644
+--- a/src/include/duckdb/parser/peg/inlined_grammar.hpp
++++ b/src/include/duckdb/parser/peg/inlined_grammar.hpp
+@@ -1291,7 +1291,7 @@ const char INLINED_PEG_GRAMMAR[] = {
+ 	"TableAliasWithoutAs <- Identifier ColumnAliases?\n"
+ 	"AtClause <- 'AT' Parens(AtSpecifier)\n"
+ 	"AtSpecifier <- AtUnit '=>' Expression\n"
+-	"AtUnit <- 'VERSION' / 'TIMESTAMP'\n"
++	"AtUnit <- 'VERSION' / 'TIMESTAMP' / 'BRANCH' / 'TAG'\n"
+ 	"JoinClause <- RegularJoinClause / JoinWithoutOnClause\n"
+ 	"RegularJoinClause <- 'ASOF'? JoinType? 'JOIN' TableRef JoinQualifier\n"
+ 	"JoinWithoutOnClause <- JoinPrefix 'JOIN' TableRef\n"
+diff --git a/src/parser/peg/grammar/statements/select.gram b/src/parser/peg/grammar/statements/select.gram
+index d00869fb9c..ad57fcee2b 100644
+--- a/src/parser/peg/grammar/statements/select.gram
++++ b/src/parser/peg/grammar/statements/select.gram
+@@ -85,7 +85,7 @@ TableAliasWithoutAs <- Identifier ColumnAliases?
+ 
+ AtClause <- 'AT' Parens(AtSpecifier)
+ AtSpecifier <- AtUnit '=>' Expression
+-AtUnit <- 'VERSION' / 'TIMESTAMP'
++AtUnit <- 'VERSION' / 'TIMESTAMP' / 'BRANCH' / 'TAG'
+ 
+ JoinClause <- RegularJoinClause / JoinWithoutOnClause
+ RegularJoinClause <- 'ASOF'? JoinType? 'JOIN' TableRef JoinQualifier

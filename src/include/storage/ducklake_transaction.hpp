@@ -297,7 +297,7 @@ public:
 	void SetActiveBranch(idx_t branch_id, const string &branch_name, idx_t head_snapshot_id);
 	bool HasActiveBranch() const;
 	idx_t GetActiveBranchId() const;
-	const string &GetActiveBranchName() const;
+	string GetActiveBranchName() const;
 	idx_t GetActiveBranchHeadSnapshot() const;
 
 	string GetDefaultSchemaName();
@@ -402,10 +402,6 @@ private:
 	vector<MappingIndex> pending_name_map_cache_invalidations;
 	//! Transaction-scoped commit preconditions (Phase 0); cleared on commit/rollback
 	vector<CommitPrecondition> commit_preconditions;
-	//! Phase 2: active writable branch for this transaction (nullopt = main / branch 0)
-	optional_idx active_branch_id;
-	string active_branch_name;
-	idx_t active_branch_head_snapshot = 0;
 
 	atomic<idx_t> catalog_version;
 };

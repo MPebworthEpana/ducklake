@@ -80,6 +80,15 @@ private:
 	unordered_map<DuckLakeSchemaCacheEntry *, shared_ptr<DuckLakeSchemaCacheEntry>> pins;
 };
 
+//! Per-connection active writable branch (`ducklake_use_branch`). Lives on ClientContext so it
+//! survives auto-commit and is independent across concurrent connections to the same catalog.
+class DuckLakeBranchSessionState : public ClientContextState {
+public:
+	optional_idx branch_id;
+	string branch_name;
+	idx_t head_snapshot_id = 0;
+};
+
 enum class InlinedDeletionCacheResult { EXISTS, DOES_NOT_EXIST, UNKNOWN };
 
 class DuckLakeCatalog : public Catalog {
@@ -235,6 +244,16 @@ public:
 	bool SupportsWritableBranches() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_3;
 	}
+
+	//! Per-connection writable branch session (`ducklake_use_branch`). Survives auto-commit.
+	void SetSessionBranch(ClientContext &context, idx_t branch_id, const string &branch_name, idx_t head_snapshot_id);
+	void ClearSessionBranch(ClientContext &context);
+	void SetSessionBranchHead(ClientContext &context, idx_t head_snapshot_id);
+	bool HasSessionBranch(ClientContext &context) const;
+	idx_t GetSessionBranchId(ClientContext &context) const;
+	string GetSessionBranchName(ClientContext &context) const;
+	idx_t GetSessionBranchHeadSnapshot(ClientContext &context) const;
+	string BranchSessionStateKey() const;
 
 	void OnDetach(ClientContext &context) override;
 
