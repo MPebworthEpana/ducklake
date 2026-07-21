@@ -486,19 +486,26 @@ this core to catalog semantics."
 
 ## 5. Suggested Phasing
 
-1. **Refs + read path:** F1 (branch table), F2 (zero-copy create), F3 (lineage
-   visibility), F7 (`AT (BRANCH => ...)`, attach option), F13 (migration). Branches are
-   readable, writable only on `main`.
-2. **Branch writes:** F4 (deletion records), F5 (schema changes complete), F6 (ID
-   allocation), F8 (DML/DDL/inlining/compaction isolation).
-3. **Fast-forward merge + safety:** F9 (FF-only), F11 (branch-aware GC), F12 (listing,
-   per-branch history).
-4. **Three-way merge:** F9 (conflict detection built on `CheckForConflicts`), pre-merge
-   diff (F12).
-5. **Parity extras:** F10 (tags), cherry-pick/transplant, catalog-level diff.
+Detailed per-phase implementation plans live in [`docs/branching/`](branching/README.md).
+
+1. **Refs + read path** ([plan](branching/PHASE_1_NAMED_REFS.md)): F1 (ref table), F10
+   (tags — a ref that never advances comes for free), the pointer form of F2, the read
+   half of F7 (`AT (BRANCH/TAG => ...)`, attach option), expiry protection from F11, and
+   F13 (migration). Refs are zero-copy snapshot pointers; branches are not yet writable.
+2. **Writable branches** ([plan](branching/PHASE_2_WRITABLE_BRANCHES.md)): F3 (lineage
+   visibility), F4 (deletion records), F5 (schema changes complete), F6 (ID allocation),
+   F8 (DML/DDL/inlining/compaction isolation), full F2/F7.
+3. **Fast-forward merge + branch-aware GC**
+   ([plan](branching/PHASE_3_FAST_FORWARD_MERGE_AND_GC.md)): F9 (FF-only), F11 (full
+   reachability GC, branch drop), F12 (per-branch history).
+4. **Three-way merge** ([plan](branching/PHASE_4_THREE_WAY_MERGE.md)): F9 (conflict
+   detection built on `CheckForConflicts`).
+5. **Parity extras** ([plan](branching/PHASE_5_PARITY_EXTRAS.md)): cherry-pick/transplant,
+   catalog-level diff, ref history (full F12).
 
 Independent of the above: **F14 (commit preconditions)** is small, self-contained, and
-valuable on its own — it could ship first as a stepping stone, per the suggestion in #194.
+valuable on its own — it could ship first as a stepping stone, per the suggestion in #194
+([plan](branching/PHASE_0_COMMIT_PRECONDITIONS.md)).
 
 ---
 
