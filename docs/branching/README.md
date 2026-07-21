@@ -24,6 +24,8 @@ compatible, and gates its metadata changes behind a spec-version bump using the 
 **Hardening (before P5):** [HARDENING_P2_P4_GAPS.md](HARDENING_P2_P4_GAPS.md) —
 closes deferred gaps from P2–P4 (tombstones, reachability GC, OCC/`DetectConflicts`
 unification, branch inlining, file-level merge deletes) in three PRs (H1→H2→H3).
+Decided policies: admin-selectable merge tombstone mode (default convert-to-`end_snapshot`);
+inlining layout fixed at setup (default shared table + `branch_id`) with admin conversion.
 
 ¹ Feature IDs (F1–F15) refer to the catalog in
 [`GIT_LIKE_BRANCHING_FEATURES.md` §3](../GIT_LIKE_BRANCHING_FEATURES.md).
