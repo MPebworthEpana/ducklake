@@ -46,6 +46,7 @@ public:
 	DuckLakeSnapshotsFunction();
 
 	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<string> &names);
+	static void GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names);
 	static vector<Value> GetSnapshotValues(const DuckLakeSnapshotInfo &snapshot);
 };
 
@@ -103,6 +104,46 @@ public:
 class DuckLakeSetCommitMessage : public TableFunction {
 public:
 	DuckLakeSetCommitMessage();
+};
+
+class DuckLakeRequireUnchangedFunction : public TableFunction {
+public:
+	DuckLakeRequireUnchangedFunction();
+};
+
+class DuckLakeCreateBranchFunction : public TableFunction {
+public:
+	DuckLakeCreateBranchFunction();
+};
+
+class DuckLakeCreateTagFunction : public TableFunction {
+public:
+	DuckLakeCreateTagFunction();
+};
+
+class DuckLakeDropBranchFunction : public TableFunction {
+public:
+	DuckLakeDropBranchFunction();
+};
+
+class DuckLakeDropTagFunction : public TableFunction {
+public:
+	DuckLakeDropTagFunction();
+};
+
+class DuckLakeRefsFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeRefsFunction();
+};
+
+class DuckLakeUseBranchFunction : public TableFunction {
+public:
+	DuckLakeUseBranchFunction();
+};
+
+class DuckLakeMergeBranchFunction : public TableFunction {
+public:
+	DuckLakeMergeBranchFunction();
 };
 
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {

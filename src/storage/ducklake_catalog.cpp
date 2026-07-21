@@ -806,7 +806,7 @@ shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransactio
 shared_ptr<DuckLakeTableStats> DuckLakeCatalog::GetTableStats(DuckLakeTransaction &transaction,
                                                               DuckLakeSnapshot snapshot, TableIndex table_id) {
 	auto &cache = GetObjectCacheInstance();
-	auto key = StatsCacheKey(snapshot.next_file_id, table_id);
+	auto key = StatsCacheKey(snapshot.next_file_id, table_id, snapshot.branch_id);
 	auto cached = cache.Get<DuckLakeTableStatsCacheEntry>(key);
 	if (cached) {
 		auto *raw = cached.get();
@@ -1015,6 +1015,12 @@ idx_t DuckLakeCatalog::DataInliningRowLimit(SchemaIndex schema_index, TableIndex
 
 idx_t DuckLakeCatalog::DataInliningRowLimit(ClientContext &context, SchemaIndex schema_index,
                                             TableIndex table_index) const {
+	// Phase 2 M1: inlined data tables are not yet branch-scoped. Force parquet on non-main
+	// branches so inserts cannot leak across branches. Inlined deletes of inherited rows are
+	// refused separately in the delete path.
+	if (SupportsWritableBranches() && HasSessionBranch(context) && GetSessionBranchId(context) != 0) {
+		return 0;
+	}
 	string value_str;
 	if (TryGetConfigOption("data_inlining_row_limit", value_str, schema_index, table_index)) {
 		return Value(value_str).GetValue<idx_t>();
@@ -1085,17 +1091,17 @@ void DuckLakeCatalog::CacheInlinedDeletionTableResult(TableIndex table_id, DuckL
 	}
 }
 
-string DuckLakeCatalog::StatsCacheKey(idx_t next_file_id, TableIndex table_id) const {
-	return StringUtil::Format("ducklake:%s:%s:%s:stats:%llu:table:%llu", GetName(), MetadataPath(), instance_id,
-	                          next_file_id, table_id.index);
+string DuckLakeCatalog::StatsCacheKey(idx_t next_file_id, TableIndex table_id, idx_t branch_id) const {
+	return StringUtil::Format("ducklake:%s:%s:%s:stats:%llu:table:%llu:branch:%llu", GetName(), MetadataPath(),
+	                          instance_id, next_file_id, table_id.index, branch_id);
 }
 
 string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version) const {
 	return StringUtil::Format("ducklake:%s:%s:%s:schema:%llu", GetName(), MetadataPath(), instance_id, schema_version);
 }
 
-void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id) {
-	GetObjectCacheInstance().Delete(StatsCacheKey(next_file_id, table_id));
+void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id, idx_t branch_id) {
+	GetObjectCacheInstance().Delete(StatsCacheKey(next_file_id, table_id, branch_id));
 }
 
 void DuckLakeCatalog::InvalidateSchemaCache(idx_t schema_version) {
@@ -1113,6 +1119,62 @@ string DuckLakeCatalog::SchemaPinStateKey() const {
 
 ObjectCache &DuckLakeCatalog::GetObjectCacheInstance() {
 	return GetDatabase().GetObjectCache();
+}
+
+void DuckLakeCatalog::SetSessionBranch(ClientContext &context, idx_t branch_id, const string &branch_name,
+                                       idx_t head_snapshot_id) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	state->branch_id = branch_id;
+	state->branch_name = branch_name;
+	state->head_snapshot_id = head_snapshot_id;
+}
+
+void DuckLakeCatalog::ClearSessionBranch(ClientContext &context) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	state->branch_id = optional_idx();
+	state->branch_name.clear();
+	state->head_snapshot_id = 0;
+}
+
+void DuckLakeCatalog::SetSessionBranchHead(ClientContext &context, idx_t head_snapshot_id) {
+	auto &registered = *context.registered_state;
+	auto state = registered.GetOrCreate<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	if (state->branch_id.IsValid()) {
+		state->head_snapshot_id = head_snapshot_id;
+	}
+}
+
+bool DuckLakeCatalog::HasSessionBranch(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state && state->branch_id.IsValid();
+}
+
+idx_t DuckLakeCatalog::GetSessionBranchId(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	if (!state || !state->branch_id.IsValid()) {
+		return 0;
+	}
+	return state->branch_id.GetIndex();
+}
+
+string DuckLakeCatalog::GetSessionBranchName(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state ? state->branch_name : string();
+}
+
+idx_t DuckLakeCatalog::GetSessionBranchHeadSnapshot(ClientContext &context) const {
+	auto &registered = *context.registered_state;
+	auto state = registered.Get<DuckLakeBranchSessionState>(BranchSessionStateKey());
+	return state ? state->head_snapshot_id : 0;
+}
+
+string DuckLakeCatalog::BranchSessionStateKey() const {
+	return StringUtil::Format("ducklake_branch_session:%s:%s:%s", GetName(), MetadataPath(), instance_id);
 }
 
 } // namespace duckdb

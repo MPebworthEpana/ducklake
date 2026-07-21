@@ -764,6 +764,11 @@ void DuckLakeTransaction::Start() {
 }
 
 void DuckLakeTransaction::Commit() {
+	if (HasCommitPreconditions()) {
+		// Preconditions validate even for no-op / read-only transactions so a pure
+		// "assert unchanged" workflow works. Violations are never retried.
+		CheckCommitPreconditions();
+	}
 	if (ChangesMade()) {
 		FlushChanges();
 	} else if (connection) {
@@ -772,6 +777,7 @@ void DuckLakeTransaction::Commit() {
 	FlushNameMapCacheInvalidations();
 	connection.reset();
 	state->local_changes.Clear();
+	commit_preconditions.clear();
 	SetRequiresNewInlinedTable(false);
 	ClearSchemaCachePins();
 }
@@ -785,6 +791,7 @@ void DuckLakeTransaction::Rollback() {
 	state->CleanupFiles();
 	state->local_changes.Clear();
 	pending_name_map_cache_invalidations.clear();
+	commit_preconditions.clear();
 	SetRequiresNewInlinedTable(false);
 	ClearSchemaCachePins();
 }
@@ -1366,6 +1373,12 @@ void DuckLakeTransaction::FlushChanges() {
 	if (!ChangesMade()) {
 		return;
 	}
+	// Re-check immediately before the commit attempt. RunCommitLoop re-checks on each
+	// retry; the server-side path gets this single check (preconditions are client-side
+	// state and cannot be re-evaluated inside remote SQL without further plumbing).
+	if (HasCommitPreconditions()) {
+		CheckCommitPreconditions();
+	}
 	auto retry_config = DuckLakeRetryConfig::FromContext(*context.lock());
 	auto transaction_changes = GetTransactionChanges();
 	if (metadata_manager->CanSkipSnapshotFetch(transaction_changes)) {
@@ -1422,7 +1435,8 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 		return result;
 	};
 	context.get_snapshot = [&]() {
-		return GetSnapshot();
+		// Commit ID allocation must use the global max snapshot, not the branch head.
+		return GetGlobalSnapshot();
 	};
 	context.execute_commit_batch = [&](DuckLakeSnapshot snapshot, string &query) {
 		return metadata_manager->Execute(snapshot, query);
@@ -1535,6 +1549,50 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	};
 	context.commit_info = state->commit_info;
 	context.supports_v1_1_metadata = ducklake_catalog.SupportsRowGroupCount();
+	context.supports_writable_branches = ducklake_catalog.SupportsWritableBranches();
+	context.branch_id = GetActiveBranchId();
+	if (HasCommitPreconditions()) {
+		context.check_commit_preconditions = [this]() {
+			CheckCommitPreconditions();
+		};
+	}
+	if (ducklake_catalog.SupportsWritableBranches()) {
+		auto branch_ref_id = GetActiveBranchId();
+		// When no use_branch() call was made, treat commits as advancing main (ref_id 0).
+		// expected_head: prefer the tracked head; for main without an explicit use_branch,
+		// CAS against whatever is currently stored on the ref.
+		idx_t expected_head = HasActiveBranch() ? GetActiveBranchHeadSnapshot() : DConstants::INVALID_INDEX;
+		context.advance_branch_head = [this, branch_ref_id, expected_head](idx_t new_snapshot_id) {
+			// Re-read the head on every attempt so OCC retries after a concurrent same-branch
+			// commit can succeed. Conflict checking already validated logical safety.
+			idx_t cas_expected = expected_head;
+			DuckLakeRefInfo current;
+			auto q = metadata_manager->Query(StringUtil::Format(
+			    "SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu AND "
+			    "ref_type = 'branch' AND status = 'active'",
+			    branch_ref_id));
+			if (q->HasError()) {
+				q->GetErrorObject().Throw("Failed to read branch head: ");
+			}
+			bool found = false;
+			for (auto &row : *q) {
+				cas_expected = row.GetValue<idx_t>(0);
+				found = true;
+			}
+			if (!found) {
+				throw TransactionException("Transaction conflict - branch ref %llu disappeared during commit",
+				                           branch_ref_id);
+			}
+			(void)expected_head; // retained for readability of first-attempt intent
+			metadata_manager->UpdateBranchHead(branch_ref_id, cas_expected, new_snapshot_id);
+			if (HasActiveBranch()) {
+				auto client = this->context.lock();
+				if (client) {
+					ducklake_catalog.SetSessionBranchHead(*client, new_snapshot_id);
+				}
+			}
+		};
+	}
 	state->Commit(transaction_snapshot, transaction_changes, retry_config, context);
 }
 
@@ -1551,6 +1609,119 @@ DuckLakeSnapshotCommit &DuckLakeTransaction::GetCommitInfo() {
 
 void DuckLakeTransaction::SetCommitMessage(const DuckLakeSnapshotCommit &option) {
 	state->commit_info = option;
+}
+
+void DuckLakeTransaction::AddCommitPrecondition(CommitPrecondition precondition) {
+	commit_preconditions.push_back(std::move(precondition));
+}
+
+bool DuckLakeTransaction::HasCommitPreconditions() const {
+	return !commit_preconditions.empty();
+}
+
+const vector<CommitPrecondition> &DuckLakeTransaction::GetCommitPreconditions() const {
+	return commit_preconditions;
+}
+
+void DuckLakeTransaction::SetActiveBranch(idx_t branch_id, const string &branch_name, idx_t head_snapshot_id) {
+	auto context_ref = context.lock();
+	if (!context_ref) {
+		throw InternalException("DuckLakeTransaction::SetActiveBranch called without a client context");
+	}
+	ducklake_catalog.SetSessionBranch(*context_ref, branch_id, branch_name, head_snapshot_id);
+	// Reset cached snapshot so subsequent reads/writes use the branch head.
+	lock_guard<mutex> guard(snapshot_lock);
+	snapshot.reset();
+	snapshot_cache.clear();
+}
+
+bool DuckLakeTransaction::HasActiveBranch() const {
+	auto context_ref = context.lock();
+	return context_ref && ducklake_catalog.HasSessionBranch(*context_ref);
+}
+
+idx_t DuckLakeTransaction::GetActiveBranchId() const {
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchId(*context_ref) : 0;
+}
+
+string DuckLakeTransaction::GetActiveBranchName() const {
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchName(*context_ref) : string();
+}
+
+idx_t DuckLakeTransaction::GetActiveBranchHeadSnapshot() const {
+	auto context_ref = context.lock();
+	return context_ref ? ducklake_catalog.GetSessionBranchHeadSnapshot(*context_ref) : 0;
+}
+
+static bool SnapshotChangeTouchesTable(const SnapshotChangeInformation &changes, TableIndex table_id) {
+	return changes.altered_tables.count(table_id) || changes.dropped_tables.count(table_id) ||
+	       changes.inserted_tables.count(table_id) || changes.tables_deleted_from.count(table_id) ||
+	       changes.tables_compacted.count(table_id) || changes.tables_merge_adjacent.count(table_id) ||
+	       changes.tables_rewrite_delete.count(table_id) || changes.tables_inserted_inlined.count(table_id) ||
+	       changes.tables_deleted_inlined.count(table_id) || changes.tables_flushed_inlined.count(table_id);
+}
+
+void DuckLakeTransaction::CheckCommitPreconditions() {
+	if (commit_preconditions.empty()) {
+		return;
+	}
+	// Fail closed: if snapshot_changes rows for the range are missing (e.g. after expiry),
+	// treat unknown history as a violation for catalog-scoped checks by comparing snapshot
+	// existence, and for table-scoped checks by requiring every intermediate snapshot to
+	// have a changes row.
+	for (auto &precondition : commit_preconditions) {
+		auto result = metadata_manager->Query(StringUtil::Format(R"(
+SELECT s.snapshot_id, COALESCE(c.changes_made, '') AS changes_made,
+       CASE WHEN c.snapshot_id IS NULL THEN false ELSE true END AS has_changes_row
+FROM {METADATA_CATALOG}.ducklake_snapshot s
+LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot_changes c USING (snapshot_id)
+WHERE s.snapshot_id > %llu
+ORDER BY s.snapshot_id;)",
+		                                                         precondition.since_snapshot));
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to evaluate DuckLake commit precondition: ");
+		}
+		vector<idx_t> offending_snapshots;
+		vector<string> offending_details;
+		for (auto &row : *result) {
+			auto snapshot_id = row.GetValue<idx_t>(0);
+			auto changes_made = row.GetValue<string>(1);
+			auto has_changes_row = row.GetValue<bool>(2);
+			if (precondition.table_ids.empty()) {
+				// Catalog-scoped: any newer snapshot violates the precondition.
+				offending_snapshots.push_back(snapshot_id);
+				offending_details.push_back(StringUtil::Format("snapshot %llu exists", snapshot_id));
+				continue;
+			}
+			if (!has_changes_row) {
+				// Fail closed when change history for a newer snapshot is missing.
+				offending_snapshots.push_back(snapshot_id);
+				offending_details.push_back(StringUtil::Format(
+				    "snapshot %llu has no ducklake_snapshot_changes row (history incomplete)", snapshot_id));
+				continue;
+			}
+			auto other_changes = SnapshotChangeInformation::ParseChangesMade(changes_made);
+			for (idx_t i = 0; i < precondition.table_ids.size(); i++) {
+				auto table_id = precondition.table_ids[i];
+				if (SnapshotChangeTouchesTable(other_changes, table_id)) {
+					offending_snapshots.push_back(snapshot_id);
+					offending_details.push_back(StringUtil::Format(
+					    "table \"%s\" (id %llu) changed in snapshot %llu", precondition.table_names[i],
+					    table_id.index, snapshot_id));
+				}
+			}
+		}
+		if (!offending_snapshots.empty()) {
+			string detail = StringUtil::Join(offending_details, "; ");
+			throw TransactionException(
+			    "Commit precondition violated: required that %s remain unchanged since snapshot %llu, but: %s",
+			    precondition.table_ids.empty() ? "the catalog"
+			                                  : ("table(s) [" + StringUtil::Join(precondition.table_names, ", ") + "]"),
+			    precondition.since_snapshot, detail);
+		}
+	}
 }
 
 void DuckLakeTransaction::DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots) {
@@ -1616,6 +1787,19 @@ DuckLakeSnapshot DuckLakeTransaction::GetSnapshot() {
 		snapshot = metadata_manager->GetSnapshot();
 	}
 	return *snapshot;
+}
+
+DuckLakeSnapshot DuckLakeTransaction::GetGlobalSnapshot() {
+	auto result = metadata_manager->Query(DuckLakeMetadataManager::LatestSnapshotQuery());
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to query most recent global snapshot for DuckLake: ");
+	}
+	auto snap = DuckLakeMetadataManager::ParseSnapshot(*result);
+	if (!snap) {
+		throw InvalidInputException("No snapshot found in DuckLake");
+	}
+	snap->branch_id = GetActiveBranchId();
+	return *snap;
 }
 
 DuckLakeSnapshot DuckLakeTransaction::GetSnapshot(optional_ptr<BoundAtClause> at_clause, SnapshotBound bound) {

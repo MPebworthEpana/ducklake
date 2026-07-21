@@ -1860,10 +1860,12 @@ WHERE idt.schema_version < (
 SnapshotAndStats
 DuckLakeTransactionState::CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
                                             const TransactionChangeInformation &changes,
-                                            const std::function<unique_ptr<QueryResult>(string)> &executor) {
+                                            const std::function<unique_ptr<QueryResult>(string)> &executor,
+                                            bool filter_by_branch) {
 	SnapshotAndStats snapshot_and_stats;
 	// get all changes made to the system after the current snapshot was started
-	auto changes_made = DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor);
+	auto changes_made =
+	    DuckLakeMetadataManager::GetSnapshotAndStatsAndChanges(snapshot_and_stats, executor, filter_by_branch);
 	// parse changes made by other transactions
 	auto other_changes = SnapshotChangeInformation::ParseChangesMade(changes_made.changes_made);
 
@@ -1889,12 +1891,18 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 				// we failed our first commit due to another transaction committing
 				// retry - but first check for conflicts
 				commit_stats_snapshot =
-				    CheckForConflicts(transaction_snapshot, attempt_changes, context.conflict_query_executor);
+				    CheckForConflicts(transaction_snapshot, attempt_changes, context.conflict_query_executor,
+				                      context.supports_writable_branches);
 				stats = &commit_stats_snapshot.stats;
 			} else {
 				commit_stats_snapshot.snapshot = context.get_snapshot();
 			}
+			// Re-evaluate user-declared preconditions on every attempt; violations must not retry.
+			if (context.check_commit_preconditions) {
+				context.check_commit_preconditions();
+			}
 			commit_snapshot.snapshot_id++;
+			commit_snapshot.branch_id = context.branch_id;
 			if (SchemaChangesMade()) {
 				// we changed the schema - need to get a new schema version
 				commit_snapshot.schema_version++;
@@ -1902,12 +1910,16 @@ void DuckLakeTransactionState::Commit(DuckLakeSnapshot transaction_snapshot,
 			can_retry = true;
 			DuckLakeCommitState commit_state(commit_snapshot);
 			// write the new snapshot
-			string batch_queries = DuckLakeMetadataManager::InsertSnapshotSql();
+			string batch_queries =
+			    DuckLakeMetadataManager::InsertSnapshotSql(context.supports_writable_branches);
 			batch_queries += CommitChanges(commit_state, attempt_changes, stats, context, attempt_dropped_file_stats);
 			batch_queries += WriteSnapshotChanges(commit_state, attempt_changes, context.commit_info);
 			auto res = context.execute_commit_batch(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				res->GetErrorObject().Throw("Failed to flush changes into DuckLake: ");
+			}
+			if (context.advance_branch_head) {
+				context.advance_branch_head(commit_snapshot.snapshot_id);
 			}
 			bool flushed_inlined = !flushed_inlined_tables.empty();
 			context.flush_cache_if_pending();

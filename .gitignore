@@ -9,3 +9,6 @@ test/python/__pycache__/
 .Rhistory
 scripts/data/
 duckdb_benchmark_data/
+vcpkg/
+
+.cache/

@@ -66,4 +66,13 @@ struct SnapshotChangeInformation {
 	static SnapshotChangeInformation ParseChangesMade(const string &changes_made);
 };
 
+//! Merge `other` into `target` (set-union of all change categories).
+void MergeSnapshotChangeInformation(SnapshotChangeInformation &target, const SnapshotChangeInformation &other);
+
+//! Symmetric conflict detection for three-way merge (and reusable by OCC callers).
+//! Returns human-readable conflict messages; empty means no conflicts.
+//! Same-table appends on both sides are NOT conflicts (compose); overlapping deletes are.
+vector<string> DetectConflicts(const SnapshotChangeInformation &source_changes,
+                               const SnapshotChangeInformation &target_changes);
+
 } // namespace duckdb

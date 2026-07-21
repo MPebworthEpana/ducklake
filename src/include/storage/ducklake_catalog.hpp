@@ -80,6 +80,15 @@ private:
 	unordered_map<DuckLakeSchemaCacheEntry *, shared_ptr<DuckLakeSchemaCacheEntry>> pins;
 };
 
+//! Per-connection active writable branch (`ducklake_use_branch`). Lives on ClientContext so it
+//! survives auto-commit and is independent across concurrent connections to the same catalog.
+class DuckLakeBranchSessionState : public ClientContextState {
+public:
+	optional_idx branch_id;
+	string branch_name;
+	idx_t head_snapshot_id = 0;
+};
+
 enum class InlinedDeletionCacheResult { EXISTS, DOES_NOT_EXIST, UNKNOWN };
 
 class DuckLakeCatalog : public Catalog {
@@ -227,6 +236,24 @@ public:
 	bool SupportsViewColumnTags() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_1;
 	}
+	//! Whether the metadata schema has named refs (branches/tags) (added in 1.1-dev2)
+	bool SupportsRefs() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_2;
+	}
+	//! Whether the metadata schema supports writable divergent branches (added in 1.1-dev3)
+	bool SupportsWritableBranches() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_3;
+	}
+
+	//! Per-connection writable branch session (`ducklake_use_branch`). Survives auto-commit.
+	void SetSessionBranch(ClientContext &context, idx_t branch_id, const string &branch_name, idx_t head_snapshot_id);
+	void ClearSessionBranch(ClientContext &context);
+	void SetSessionBranchHead(ClientContext &context, idx_t head_snapshot_id);
+	bool HasSessionBranch(ClientContext &context) const;
+	idx_t GetSessionBranchId(ClientContext &context) const;
+	string GetSessionBranchName(ClientContext &context) const;
+	idx_t GetSessionBranchHeadSnapshot(ClientContext &context) const;
+	string BranchSessionStateKey() const;
 
 	void OnDetach(ClientContext &context) override;
 
@@ -283,7 +310,7 @@ public:
 	void CacheInlinedDeletionTableResult(TableIndex table_id, DuckLakeSnapshot snapshot, bool exists);
 
 	//! Invalidate the cached table stats entry for a given stats cache key.
-	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id);
+	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0);
 	//! Invalidate the cached schema entry for a given schema_version.
 	void InvalidateSchemaCache(idx_t schema_version);
 	//! Invalidate a cached name map for a deleted mapping ID.
@@ -298,7 +325,7 @@ private:
 	//! Pin a schema cache entry for the duration of the current query to ensure safe memory access.
 	void PinSchemaForQuery(DuckLakeTransaction &transaction, shared_ptr<DuckLakeSchemaCacheEntry> entry);
 	void LoadNameMaps(DuckLakeTransaction &transaction);
-	string StatsCacheKey(idx_t next_file_id, TableIndex table_id) const;
+	string StatsCacheKey(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0) const;
 	string SchemaCacheKey(idx_t schema_version) const;
 	string SchemaPinStateKey() const;
 	ObjectCache &GetObjectCacheInstance();

@@ -88,6 +88,30 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeSetCommitMessage set_commit_message;
 	loader.RegisterFunction(set_commit_message);
 
+	DuckLakeRequireUnchangedFunction require_unchanged;
+	loader.RegisterFunction(require_unchanged);
+
+	DuckLakeCreateBranchFunction create_branch;
+	loader.RegisterFunction(create_branch);
+
+	DuckLakeCreateTagFunction create_tag;
+	loader.RegisterFunction(create_tag);
+
+	DuckLakeDropBranchFunction drop_branch;
+	loader.RegisterFunction(drop_branch);
+
+	DuckLakeDropTagFunction drop_tag;
+	loader.RegisterFunction(drop_tag);
+
+	DuckLakeRefsFunction refs;
+	loader.RegisterFunction(refs);
+
+	DuckLakeUseBranchFunction use_branch;
+	loader.RegisterFunction(use_branch);
+
+	DuckLakeMergeBranchFunction merge_branch;
+	loader.RegisterFunction(merge_branch);
+
 	auto table_changes = DuckLakeTableInsertionsFunction::GetDuckLakeTableChanges();
 	loader.RegisterFunction(*table_changes);
 

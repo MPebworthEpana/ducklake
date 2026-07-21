@@ -171,6 +171,15 @@ struct DuckLakeRetryConfig {
 	static DuckLakeRetryConfig FromContext(ClientContext &context);
 };
 
+//! User-declared commit precondition (Phase 0 / F14). Resolved table IDs are stored so
+//! renames after declaration cannot dodge the check. An empty table_ids list means
+//! catalog-scoped: fail if any snapshot newer than since_snapshot exists.
+struct CommitPrecondition {
+	vector<TableIndex> table_ids;
+	vector<string> table_names; // original names for error messages
+	idx_t since_snapshot = 0;
+};
+
 class DuckLakeTransaction : public Transaction, public enable_shared_from_this<DuckLakeTransaction> {
 	friend class DuckLakeTransactionState;
 	friend class DuckLakeInitializer;
@@ -204,6 +213,8 @@ public:
 	DuckLakeSnapshot GetSnapshot();
 	DuckLakeSnapshot GetSnapshot(optional_ptr<BoundAtClause> at_clause,
 	                             SnapshotBound bound = SnapshotBound::UPPER_BOUND);
+	//! Always returns the catalog-global latest snapshot (for ID allocation at commit).
+	DuckLakeSnapshot GetGlobalSnapshot();
 	void PinSchemaCacheEntry(shared_ptr<DuckLakeSchemaCacheEntry> entry);
 
 	static DuckLakeTransaction &Get(ClientContext &context, Catalog &catalog);
@@ -273,6 +284,21 @@ public:
 	void SetConfigOption(const DuckLakeConfigOption &option);
 
 	void SetCommitMessage(const DuckLakeSnapshotCommit &option);
+
+	//! Declare a commit precondition that must hold when this transaction commits.
+	void AddCommitPrecondition(CommitPrecondition precondition);
+	bool HasCommitPreconditions() const;
+	const vector<CommitPrecondition> &GetCommitPreconditions() const;
+	//! Evaluate all declared preconditions against the live metadata catalog.
+	//! Throws TransactionException on violation (not retryable).
+	void CheckCommitPreconditions();
+
+	//! Phase 2: set the active writable branch for this transaction
+	void SetActiveBranch(idx_t branch_id, const string &branch_name, idx_t head_snapshot_id);
+	bool HasActiveBranch() const;
+	idx_t GetActiveBranchId() const;
+	string GetActiveBranchName() const;
+	idx_t GetActiveBranchHeadSnapshot() const;
 
 	string GetDefaultSchemaName();
 
@@ -374,6 +400,8 @@ private:
 	DuckLakeNameMapSet new_name_maps;
 	//! Name maps deleted by direct metadata operations, applied to the catalog cache on commit
 	vector<MappingIndex> pending_name_map_cache_invalidations;
+	//! Transaction-scoped commit preconditions (Phase 0); cleared on commit/rollback
+	vector<CommitPrecondition> commit_preconditions;
 
 	atomic<idx_t> catalog_version;
 };

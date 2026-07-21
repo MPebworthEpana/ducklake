@@ -19,6 +19,7 @@
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_transaction_changes.hpp"
 #include "common/ducklake_encryption.hpp"
 #include "common/ducklake_options.hpp"
 #include "common/index.hpp"
@@ -205,10 +206,21 @@ protected:
 	void SubstituteSnapshotPlaceholders(DuckLakeSnapshot snapshot, string &query) const;
 
 public:
+	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, `{BRANCH_STATS_FILTER}`, `{BRANCH_OWNED_FILTER}`,
+	//! `{BRANCH_ID_JOIN}`, and `{VISIBLE_*}` placeholders. Must run before `{SNAPSHOT_ID}` /
+	//! `{BRANCH_ID}` substitution.
+	static void ExpandBranchAwarePlaceholders(string &query, bool supports_writable_branches);
+	//! Classic begin/end snapshot interval predicate for `alias` (non-empty required).
+	static string ClassicIntervalVisibility(const string &alias);
+	//! Lineage + tombstone visibility for a versioned metadata row owned by `alias.branch_id`.
+	static string LineageIntervalVisibility(const string &alias, const string &object_id_column,
+	                                        const string &deletion_table);
 	//! Pure SQL templates (use `{METADATA_CATALOG}` placeholder) — caller substitutes + executes.
 	//! Both used by the regular metadata-manager methods and by server-side commit, which runs the
 	//! SQL on a fresh Connection without going through the metadata-manager wrapper.
 	static string LatestSnapshotQuery();
+	//! Latest snapshot for the `main` branch head (Phase 2). Falls back to global MAX when refs absent.
+	static string MainBranchSnapshotQuery();
 	static string GlobalTableStatsQuery();
 	//! Pure parsers for the results of the above queries.
 	static unique_ptr<DuckLakeSnapshot> ParseSnapshot(QueryResult &result);
@@ -343,14 +355,15 @@ public:
 	                               const vector<DuckLakePath> &resolved_paths);
 	//! SQL templates with {METADATA_CATALOG} / {SNAPSHOT_ID} placeholders, shared with the
 	//! server-side commit path.
-	static string InsertSnapshotSql();
+	static string InsertSnapshotSql(bool with_branch_id = false);
 	static string WriteSnapshotChangesSql(const SnapshotChangeInfo &change_info,
 	                                      const DuckLakeSnapshotCommit &commit_info);
 	static string UpdateGlobalTableStatsSql(const DuckLakeGlobalStatsInfo &stats);
 	static SnapshotChangeInfo
 	GetSnapshotAndStatsAndChanges(SnapshotAndStats &current_snapshot,
-	                              const std::function<unique_ptr<QueryResult>(string)> &executor);
-	static string GetSnapshotAndStatsAndChangesQuery();
+	                              const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                              bool filter_by_branch = false);
+	static string GetSnapshotAndStatsAndChangesQuery(bool filter_by_branch = false);
 	static SnapshotChangeInfo ParseSnapshotAndStatsAndChanges(QueryResult &result, SnapshotAndStats &current_snapshot);
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot();
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot(BoundAtClause &at_clause, SnapshotBound bound);
@@ -401,8 +414,33 @@ public:
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void MigrateV04();
 	virtual void MigrateV10(bool allow_failures = false);
+	//! 1.1-dev1 → 1.1-dev2: named refs (branches + tags)
+	virtual void MigrateV11(bool allow_failures = false);
+	//! 1.1-dev2 → 1.1-dev3: writable divergent branches
+	virtual void MigrateV12(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
+
+	//! Named ref (branch/tag) API — requires SupportsRefs()
+	virtual idx_t CreateRef(const string &ref_name, const string &ref_type, idx_t snapshot_id,
+	                        optional_idx parent_ref_id = optional_idx());
+	virtual void DropRef(const string &ref_name, const string &ref_type);
+	virtual vector<DuckLakeRefInfo> GetRefs(const string &ref_type_filter = string());
+	//! Returns true and fills `out` when a matching live ref is found.
+	virtual bool TryResolveRef(const string &ref_name, const string &ref_type, DuckLakeRefInfo &out);
+	virtual set<idx_t> GetPinnedSnapshotIds();
+	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
+	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
+	//! Phase 3/4: merge source branch into target (FF when possible, else three-way).
+	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,
+	                                              bool dry_run);
+	//! Snapshots visible on a branch (own + lineage-capped ancestors).
+	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());
+	//! Aggregate snapshot_changes for a branch in (after_snapshot, through_snapshot].
+	virtual SnapshotChangeInformation GetBranchChangesSince(idx_t branch_id, idx_t after_snapshot,
+	                                                        idx_t through_snapshot);
+	//! Common ancestor (fork / last-merge cap) of source relative to target.
+	virtual idx_t GetMergeBaseSnapshot(idx_t source_branch_id, idx_t target_branch_id);
 
 	string LoadPath(string path);
 	string StorePath(string path);
@@ -477,7 +515,8 @@ protected:
 
 private:
 	template <class T>
-	static string FlushDrop(const string &metadata_table_name, const string &id_name, const set<T> &dropped_entries);
+	static string FlushDrop(const string &metadata_table_name, const string &id_name, const set<T> &dropped_entries,
+	                        bool enforce_branch_ownership = true);
 	template <class T>
 	DuckLakeFileData ReadDataFile(DuckLakeTableEntry &table, T &row, idx_t &col_idx, bool is_encrypted);
 	template <class T>

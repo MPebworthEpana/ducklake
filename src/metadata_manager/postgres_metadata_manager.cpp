@@ -122,6 +122,16 @@ unique_ptr<QueryResult> PostgresMetadataManager::Query(DuckLakeSnapshot snapshot
 }
 
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {
+	if (transaction.GetCatalog().SupportsWritableBranches()) {
+		return R"(
+	SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL},
+		'SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
+		 FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot WHERE snapshot_id = (
+		     SELECT snapshot_id FROM {METADATA_SCHEMA_ESCAPED}.ducklake_ref
+		     WHERE lower(ref_name) = ''main'' AND ref_type = ''branch'' AND status = ''active''
+		 );')
+	)";
+	}
 	return R"(
 	SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL},
 		'SELECT snapshot_id, schema_version, next_catalog_id, next_file_id

@@ -2,6 +2,7 @@
 #include "storage/ducklake_transaction.hpp"
 #include "common/ducklake_util.hpp"
 #include "storage/ducklake_transaction_changes.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "duckdb/common/sql_identifier.hpp"
 
 namespace duckdb {
@@ -55,6 +56,14 @@ void DuckLakeSnapshotsFunction::GetSnapshotTypes(vector<LogicalType> &return_typ
 	return_types.emplace_back(LogicalType::VARCHAR);
 
 	names.emplace_back("commit_extra_info");
+	return_types.emplace_back(LogicalType::VARCHAR);
+}
+
+void DuckLakeSnapshotsFunction::GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names) {
+	GetSnapshotTypes(return_types, names);
+	names.emplace_back("branch_id");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 }
 
@@ -157,20 +166,68 @@ static unique_ptr<FunctionData> DuckLakeSnapshotsBind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<string> &names) {
 	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
-
+	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &metadata_manager = transaction.GetMetadataManager();
-	auto snapshots = metadata_manager.GetAllSnapshots();
+
+	optional_idx branch_id;
+	string branch_name;
+	auto branch_entry = input.named_parameters.find("branch");
+	bool has_branch_param =
+	    branch_entry != input.named_parameters.end() && !branch_entry->second.IsNull();
+	if (has_branch_param) {
+		if (!ducklake_catalog.SupportsWritableBranches()) {
+			throw InvalidInputException(
+			    "ducklake_snapshots(branch => ...) requires DuckLake catalog version >= 1.1-dev3");
+		}
+		branch_name = StringValue::Get(branch_entry->second);
+		DuckLakeRefInfo ref;
+		if (!metadata_manager.TryResolveRef(branch_name, "branch", ref)) {
+			throw InvalidInputException("No branch named \"%s\" exists", branch_name);
+		}
+		branch_id = ref.ref_id;
+		branch_name = ref.ref_name;
+	} else if (ducklake_catalog.SupportsWritableBranches()) {
+		if (ducklake_catalog.HasSessionBranch(context)) {
+			branch_id = ducklake_catalog.GetSessionBranchId(context);
+			branch_name = ducklake_catalog.GetSessionBranchName(context);
+		} else {
+			branch_id = 0;
+			branch_name = "main";
+		}
+	}
+
+	vector<DuckLakeSnapshotInfo> snapshots;
+	if (branch_id.IsValid()) {
+		snapshots = metadata_manager.GetSnapshotsForBranch(branch_id.GetIndex());
+	} else {
+		snapshots = metadata_manager.GetAllSnapshots();
+	}
+
+	bool include_branch_cols = ducklake_catalog.SupportsWritableBranches();
 	auto result = make_uniq<MetadataBindData>();
 	for (auto &snapshot : snapshots) {
 		auto row_values = DuckLakeSnapshotsFunction::GetSnapshotValues(snapshot);
+		if (include_branch_cols) {
+			if (snapshot.branch_id.IsValid()) {
+				row_values.push_back(Value::BIGINT(NumericCast<int64_t>(snapshot.branch_id.GetIndex())));
+			} else {
+				row_values.push_back(Value());
+			}
+			row_values.push_back(snapshot.branch_name.empty() ? Value() : Value(snapshot.branch_name));
+		}
 		result->rows.push_back(std::move(row_values));
 	}
-	DuckLakeSnapshotsFunction::GetSnapshotTypes(return_types, names);
+	if (include_branch_cols) {
+		DuckLakeSnapshotsFunction::GetSnapshotTypesWithBranch(return_types, names);
+	} else {
+		DuckLakeSnapshotsFunction::GetSnapshotTypes(return_types, names);
+	}
 	return std::move(result);
 }
 
 DuckLakeSnapshotsFunction::DuckLakeSnapshotsFunction()
     : DuckLakeBaseMetadataFunction("ducklake_snapshots", DuckLakeSnapshotsBind) {
+	named_parameters["branch"] = LogicalType::VARCHAR;
 }
 
 } // namespace duckdb

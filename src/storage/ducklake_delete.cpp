@@ -510,6 +510,16 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 	}
 	if (data_file_info.data_type == DuckLakeDataType::INLINED_DATA) {
 		// deletes from inlined data are not written to a file but pushed directly into the metadata manager
+		auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
+		if (catalog.SupportsWritableBranches()) {
+			auto &tx = DuckLakeTransaction::Get(context, catalog);
+			if (tx.HasActiveBranch() && tx.GetActiveBranchId() != 0) {
+				throw NotImplementedException(
+				    "Deleting inlined rows on a non-main branch is not supported until branch-scoped "
+				    "inlined data (Phase 2 M3/M4) is implemented; flush inlined data to Parquet first "
+				    "or delete from main");
+			}
+		}
 		transaction.AddNewInlinedDeletes(table.GetTableId(), data_file_info.file.path, std::move(sorted_deletes));
 		return;
 	}
