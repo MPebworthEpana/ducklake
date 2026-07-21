@@ -1,0 +1,62 @@
+# name: test/sql/branching/writable_branch_basic.test
+# description: Phase 2 M1 — writable branch create + use_branch + isolated inserts
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_branch_basic')
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.base VALUES (1);
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'dev')
+
+query II
+SELECT ref_name, snapshot_id >= 0 FROM ducklake.refs() WHERE ref_type = 'branch' ORDER BY ref_name
+----
+dev	true
+main	true
+
+# Switch to the branch and create a new table there
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+CREATE TABLE ducklake.only_on_dev(s VARCHAR);
+
+statement ok
+INSERT INTO ducklake.only_on_dev VALUES ('hello');
+
+query I
+SELECT * FROM ducklake.only_on_dev
+----
+hello
+
+# Branch head advanced
+query I
+SELECT snapshot_id > 0 FROM ducklake.refs() WHERE ref_name = 'dev'
+----
+true
+
+# Concurrent work on main should not conflict with the branch
+statement ok con1
+CALL ducklake.use_branch('main')
+
+statement ok con1
+INSERT INTO ducklake.base VALUES (2);
+
+query I
+SELECT count(*) FROM ducklake.base
+----
+2

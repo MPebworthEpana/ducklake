@@ -36,14 +36,19 @@ static void HandleDuckLakeOption(DuckLakeOptions &options, const string &option,
 		options.config_options["data_inlining_row_limit"] = value.DefaultCastAs(LogicalType::UBIGINT).ToString();
 	} else if (lcase == "snapshot_version") {
 		if (options.at_clause) {
-			throw InvalidInputException("Cannot specify both VERSION and TIMESTAMP");
+			throw InvalidInputException("Cannot specify both VERSION/TIMESTAMP and BRANCH");
 		}
 		options.at_clause = make_uniq<BoundAtClause>("version", value.DefaultCastAs(LogicalType::BIGINT));
 	} else if (lcase == "snapshot_time") {
 		if (options.at_clause) {
-			throw InvalidInputException("Cannot specify both VERSION and TIMESTAMP");
+			throw InvalidInputException("Cannot specify both VERSION/TIMESTAMP and BRANCH");
 		}
 		options.at_clause = make_uniq<BoundAtClause>("timestamp", value.DefaultCastAs(LogicalType::TIMESTAMP_TZ));
+	} else if (lcase == "branch") {
+		if (options.at_clause) {
+			throw InvalidInputException("Cannot specify both VERSION/TIMESTAMP and BRANCH");
+		}
+		options.at_clause = make_uniq<BoundAtClause>("branch", value.DefaultCastAs(LogicalType::VARCHAR));
 	} else if (StringUtil::StartsWith(lcase, "meta_")) {
 		auto parameter_name = lcase.substr(5);
 		options.metadata_parameters[parameter_name] = value;
@@ -115,7 +120,9 @@ static unique_ptr<Catalog> DuckLakeAttach(optional_ptr<StorageExtensionInfo> sto
 	}
 	if (options.at_clause) {
 		if (attach_options.access_mode == AccessMode::READ_WRITE) {
-			throw InvalidInputException("SNAPSHOT_VERSION / SNAPSHOT_TIME can only be used in read-only mode");
+			throw InvalidInputException(
+			    "SNAPSHOT_VERSION / SNAPSHOT_TIME / BRANCH can only be used in read-only mode; "
+			    "use ducklake_use_branch() for writable branch sessions");
 		}
 		attach_options.access_mode = AccessMode::READ_ONLY;
 		db.SetReadOnlyDatabase();

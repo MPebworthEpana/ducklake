@@ -11,6 +11,8 @@ add_library(
   ducklake_list_files.cpp
   ducklake_compaction_functions.cpp
   ducklake_set_commit_message.cpp
+  ducklake_require_unchanged.cpp
+  ducklake_refs.cpp
   ducklake_set_option.cpp
   ducklake_snapshots.cpp
   ducklake_options.cpp

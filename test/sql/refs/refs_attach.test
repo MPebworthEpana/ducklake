@@ -1,0 +1,47 @@
+# name: test/sql/refs/refs_attach.test
+# description: Phase 1 ATTACH (BRANCH ...) is read-only
+# group: [refs]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_attach')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (42);
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'dev')
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev')
+
+query I
+SELECT * FROM ducklake.t
+----
+42
+
+statement error
+INSERT INTO ducklake.t VALUES (99)
+----
+read-only
+
+statement ok
+DETACH ducklake
+
+statement error
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_attach', BRANCH 'dev', SNAPSHOT_VERSION 1)
+----
+Cannot specify both

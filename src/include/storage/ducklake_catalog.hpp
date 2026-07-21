@@ -227,6 +227,14 @@ public:
 	bool SupportsViewColumnTags() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_1;
 	}
+	//! Whether the metadata schema has named refs (branches/tags) (added in 1.1-dev2)
+	bool SupportsRefs() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_2;
+	}
+	//! Whether the metadata schema supports writable divergent branches (added in 1.1-dev3)
+	bool SupportsWritableBranches() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_3;
+	}
 
 	void OnDetach(ClientContext &context) override;
 

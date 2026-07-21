@@ -79,6 +79,41 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	string filter;
 	// we can never delete the most recent snapshot
 	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
+	// Phase 1: never expire snapshots pinned by live refs
+	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	auto &metadata_manager = transaction.GetMetadataManager();
+	// Phase 2 interim: refuse expiry when multiple live branches exist (full branch-aware GC is P3)
+	if (catalog.Cast<DuckLakeCatalog>().SupportsWritableBranches()) {
+		auto refs = metadata_manager.GetRefs("branch");
+		if (refs.size() > 1) {
+			throw InvalidInputException(
+			    "ducklake_expire_snapshots is not supported while multiple branches exist; "
+			    "branch-aware garbage collection arrives in a later phase");
+		}
+	}
+	auto pinned = metadata_manager.GetPinnedSnapshotIds();
+	if (has_versions) {
+		// Explicit versions list: error if any requested snapshot is pinned
+		for (auto &snapshot_id_str : StringUtil::Split(snapshot_list, ", ")) {
+			idx_t sid = StringUtil::ToUnsigned(snapshot_id_str);
+			if (pinned.count(sid)) {
+				throw InvalidInputException(
+				    "Cannot expire snapshot %llu: it is pinned by a named ref (branch or tag). "
+				    "Drop the ref first.",
+				    sid);
+			}
+		}
+	}
+	if (!pinned.empty()) {
+		string pinned_list;
+		for (auto sid : pinned) {
+			if (!pinned_list.empty()) {
+				pinned_list += ", ";
+			}
+			pinned_list += to_string(sid);
+		}
+		filter += StringUtil::Format("snapshot_id NOT IN (%s) AND ", pinned_list);
+	}
 	if (has_timestamp) {
 		auto timestamp_filter = DuckLakeTableFunctionUtil::FormatTimestampISO8601(timestamp_t(from_timestamp.value));
 		filter += StringUtil::Format("snapshot_time::TIMESTAMPTZ < '%s'", timestamp_filter);
@@ -95,8 +130,6 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	} else {
 		filter += StringUtil::Format("snapshot_id IN (%s)", snapshot_list);
 	}
-	auto &transaction = DuckLakeTransaction::Get(context, catalog);
-	auto &metadata_manager = transaction.GetMetadataManager();
 	result->snapshots = metadata_manager.GetAllSnapshots(filter);
 
 	return std::move(result);

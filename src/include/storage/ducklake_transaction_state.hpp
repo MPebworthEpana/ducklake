@@ -107,6 +107,14 @@ struct DuckLakeCommitContext {
 	bool skip_drop_empty_inlined = false;
 	//! Whether the metadata schema has the >= 1.1-dev1 additions.
 	bool supports_v1_1_metadata = false;
+	//! Whether writable divergent branches are available (>= 1.1-dev3).
+	bool supports_writable_branches = false;
+	//! Active branch for this commit (0 = main).
+	idx_t branch_id = 0;
+	//! Optional: evaluate user-declared commit preconditions (Phase 0). Throws on violation.
+	std::function<void()> check_commit_preconditions;
+	//! Optional: CAS-advance the branch head after a successful snapshot insert.
+	std::function<void(idx_t new_snapshot_id)> advance_branch_head;
 };
 
 //! Holds the per-transaction mutable change state (new/dropped/renamed catalog entries, local file
@@ -123,7 +131,8 @@ public:
 
 	SnapshotAndStats CheckForConflicts(DuckLakeSnapshot transaction_snapshot,
 	                                   const TransactionChangeInformation &changes,
-	                                   const std::function<unique_ptr<QueryResult>(string)> &executor);
+	                                   const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                                   bool filter_by_branch = false);
 	void CheckForConflicts(const TransactionChangeInformation &changes, const SnapshotChangeInformation &other_changes,
 	                       DuckLakeSnapshot transaction_snapshot,
 	                       const std::function<unique_ptr<QueryResult>(string)> &executor) const;

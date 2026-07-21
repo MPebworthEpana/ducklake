@@ -1,0 +1,201 @@
+# name: test/sql/transaction/require_unchanged.test
+# description: Phase 0 commit preconditions (ducklake_require_unchanged)
+# group: [transaction]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_require_unchanged')
+
+statement ok
+SET immediate_transaction_mode=true
+
+statement ok
+CREATE TABLE ducklake.t1(i INTEGER);
+
+statement ok
+CREATE TABLE ducklake.t2(s VARCHAR);
+
+statement ok
+INSERT INTO ducklake.t1 VALUES (1);
+
+statement ok
+INSERT INTO ducklake.t2 VALUES ('a');
+
+# Capture the floor snapshot after setup
+statement ok
+SET VARIABLE floor = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+# Catalog-scoped precondition: satisfied when nothing else commits
+statement ok
+BEGIN;
+
+statement ok
+CALL ducklake_require_unchanged('ducklake', since_snapshot => getvariable('floor'));
+
+statement ok
+INSERT INTO ducklake.t1 VALUES (2);
+
+statement ok
+COMMIT;
+
+# Table-scoped precondition: concurrent change to unrelated table is OK
+statement ok
+SET VARIABLE floor2 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor2'));
+
+statement ok con1
+INSERT INTO ducklake.t1 VALUES (3);
+
+statement ok con2
+INSERT INTO ducklake.t2 VALUES ('b');
+
+statement ok con2
+COMMIT
+
+statement ok con1
+COMMIT
+
+# Table-scoped precondition: concurrent change to the guarded table fails
+statement ok
+SET VARIABLE floor3 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor3'));
+
+statement ok con1
+INSERT INTO ducklake.t1 VALUES (4);
+
+statement ok con2
+INSERT INTO ducklake.t1 VALUES (5);
+
+statement ok con2
+COMMIT
+
+statement error con1
+COMMIT
+----
+Commit precondition violated
+
+# Catalog-scoped precondition: any newer snapshot fails
+statement ok
+SET VARIABLE floor4 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok con1
+BEGIN
+
+statement ok con2
+BEGIN
+
+statement ok con1
+CALL ducklake_require_unchanged('ducklake', since_snapshot => getvariable('floor4'));
+
+statement ok con1
+INSERT INTO ducklake.t2 VALUES ('c');
+
+statement ok con2
+INSERT INTO ducklake.t1 VALUES (6);
+
+statement ok con2
+COMMIT
+
+statement error con1
+COMMIT
+----
+Commit precondition violated
+
+# Precondition-only (no writes) transaction succeeds when nothing changed
+statement ok
+SET VARIABLE floor5 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok
+BEGIN;
+
+statement ok
+CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor5'));
+
+statement ok
+COMMIT;
+
+# Precondition-only transaction fails when another connection wrote
+statement ok
+SET VARIABLE floor6 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor6'));
+
+statement ok con2
+INSERT INTO ducklake.t1 VALUES (7);
+
+statement error con1
+COMMIT
+----
+Commit precondition violated
+
+# Rename after declare still protects the original table id:
+# declare against main.t1, then a concurrent ALTER+INSERT on that same
+# table (under its new name) must trip the precondition.
+statement ok
+SET VARIABLE floor7 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok con1
+BEGIN
+
+statement ok con1
+CALL ducklake_require_unchanged('ducklake', tables => ['main.t1'], since_snapshot => getvariable('floor7'));
+
+statement ok con2
+ALTER TABLE ducklake.t1 RENAME TO t1_renamed;
+
+statement ok con2
+INSERT INTO ducklake.t1_renamed VALUES (8);
+
+statement ok con1
+INSERT INTO ducklake.t1 VALUES (9);
+
+statement error con1
+COMMIT
+----
+Commit precondition violated
+
+statement ok
+ALTER TABLE ducklake.t1_renamed RENAME TO t1;
+
+# Catalog macro form works
+statement ok
+SET VARIABLE floor8 = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok
+BEGIN;
+
+statement ok
+CALL ducklake.require_unchanged(since_snapshot => getvariable('floor8'), tables => ['main.t2']);
+
+statement ok
+INSERT INTO ducklake.t2 VALUES ('d');
+
+statement ok
+COMMIT;

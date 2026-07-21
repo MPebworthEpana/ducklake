@@ -105,6 +105,41 @@ public:
 	DuckLakeSetCommitMessage();
 };
 
+class DuckLakeRequireUnchangedFunction : public TableFunction {
+public:
+	DuckLakeRequireUnchangedFunction();
+};
+
+class DuckLakeCreateBranchFunction : public TableFunction {
+public:
+	DuckLakeCreateBranchFunction();
+};
+
+class DuckLakeCreateTagFunction : public TableFunction {
+public:
+	DuckLakeCreateTagFunction();
+};
+
+class DuckLakeDropBranchFunction : public TableFunction {
+public:
+	DuckLakeDropBranchFunction();
+};
+
+class DuckLakeDropTagFunction : public TableFunction {
+public:
+	DuckLakeDropTagFunction();
+};
+
+class DuckLakeRefsFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeRefsFunction();
+};
+
+class DuckLakeUseBranchFunction : public TableFunction {
+public:
+	DuckLakeUseBranchFunction();
+};
+
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeOptionsFunction();

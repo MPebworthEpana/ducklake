@@ -343,14 +343,15 @@ public:
 	                               const vector<DuckLakePath> &resolved_paths);
 	//! SQL templates with {METADATA_CATALOG} / {SNAPSHOT_ID} placeholders, shared with the
 	//! server-side commit path.
-	static string InsertSnapshotSql();
+	static string InsertSnapshotSql(bool with_branch_id = false);
 	static string WriteSnapshotChangesSql(const SnapshotChangeInfo &change_info,
 	                                      const DuckLakeSnapshotCommit &commit_info);
 	static string UpdateGlobalTableStatsSql(const DuckLakeGlobalStatsInfo &stats);
 	static SnapshotChangeInfo
 	GetSnapshotAndStatsAndChanges(SnapshotAndStats &current_snapshot,
-	                              const std::function<unique_ptr<QueryResult>(string)> &executor);
-	static string GetSnapshotAndStatsAndChangesQuery();
+	                              const std::function<unique_ptr<QueryResult>(string)> &executor,
+	                              bool filter_by_branch = false);
+	static string GetSnapshotAndStatsAndChangesQuery(bool filter_by_branch = false);
 	static SnapshotChangeInfo ParseSnapshotAndStatsAndChanges(QueryResult &result, SnapshotAndStats &current_snapshot);
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot();
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot(BoundAtClause &at_clause, SnapshotBound bound);
@@ -401,8 +402,23 @@ public:
 	virtual void MigrateV03(bool allow_failures = false);
 	virtual void MigrateV04();
 	virtual void MigrateV10(bool allow_failures = false);
+	//! 1.1-dev1 → 1.1-dev2: named refs (branches + tags)
+	virtual void MigrateV11(bool allow_failures = false);
+	//! 1.1-dev2 → 1.1-dev3: writable divergent branches
+	virtual void MigrateV12(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
+
+	//! Named ref (branch/tag) API — requires SupportsRefs()
+	virtual idx_t CreateRef(const string &ref_name, const string &ref_type, idx_t snapshot_id,
+	                        optional_idx parent_ref_id = optional_idx());
+	virtual void DropRef(const string &ref_name, const string &ref_type);
+	virtual vector<DuckLakeRefInfo> GetRefs(const string &ref_type_filter = string());
+	//! Returns true and fills `out` when a matching live ref is found.
+	virtual bool TryResolveRef(const string &ref_name, const string &ref_type, DuckLakeRefInfo &out);
+	virtual set<idx_t> GetPinnedSnapshotIds();
+	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
+	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
 
 	string LoadPath(string path);
 	string StorePath(string path);

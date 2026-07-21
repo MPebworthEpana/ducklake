@@ -1,0 +1,57 @@
+# name: test/sql/refs/refs_expire.test
+# description: Phase 1 ref-pinned snapshots cannot be expired
+# group: [refs]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_expire')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+SET VARIABLE pinned = (SELECT max(snapshot_id) FROM ducklake.snapshots())
+
+statement ok
+CALL ducklake_create_tag('ducklake', 'keep', snapshot_version => getvariable('pinned'))
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+INSERT INTO ducklake.t VALUES (3);
+
+# With multiple branches (main + any extra), expiry is refused until P3
+statement ok
+CALL ducklake_create_branch('ducklake', 'dev')
+
+statement error
+CALL ducklake_expire_snapshots('ducklake', older_than => now())
+----
+multiple branches
+
+statement ok
+CALL ducklake_drop_branch('ducklake', 'dev')
+
+# Explicit pinned version errors
+statement error
+CALL ducklake_expire_snapshots('ducklake', versions => [getvariable('pinned')])
+----
+pinned by a named ref
+
+statement ok
+CALL ducklake_drop_tag('ducklake', 'keep')
+
+# After dropping the tag, the snapshot can be expired (along with older ones)
+statement ok
+CALL ducklake_expire_snapshots('ducklake', versions => [getvariable('pinned')])

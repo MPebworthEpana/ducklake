@@ -568,4 +568,14 @@ struct DuckLakeColumnMappingInfo {
 	vector<DuckLakeNameMapColumnInfo> map_columns;
 };
 
+struct DuckLakeRefInfo {
+	idx_t ref_id = 0;
+	string ref_name;
+	string ref_type; // "branch" or "tag"
+	idx_t snapshot_id = 0;
+	optional_idx parent_ref_id;
+	string status = "active";
+	timestamp_tz_t created_at;
+};
+
 } // namespace duckdb

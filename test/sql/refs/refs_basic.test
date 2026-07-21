@@ -1,0 +1,70 @@
+# name: test/sql/refs/refs_basic.test
+# description: Phase 1 named refs — create/list/drop branches and tags
+# group: [refs]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_refs_basic')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1), (2);
+
+# main branch exists after init (Phase 2 schema)
+query II
+SELECT ref_name, ref_type FROM ducklake.refs() WHERE ref_name = 'main'
+----
+main	branch
+
+statement ok
+CALL ducklake_create_branch('ducklake', 'dev')
+
+statement ok
+CALL ducklake_create_tag('ducklake', 'v1')
+
+query II
+SELECT ref_name, ref_type FROM ducklake.refs() ORDER BY ref_type, ref_name
+----
+dev	branch
+main	branch
+v1	tag
+
+# Duplicate name rejected (shared namespace)
+statement error
+CALL ducklake_create_tag('ducklake', 'dev')
+----
+already exists
+
+statement error
+CALL ducklake_drop_branch('ducklake', 'missing')
+----
+No branch named
+
+statement ok
+CALL ducklake_drop_tag('ducklake', 'v1')
+
+query I
+SELECT count(*) FROM ducklake.refs() WHERE ref_type = 'tag'
+----
+0
+
+# Catalog macros
+statement ok
+CALL ducklake.create_tag('v2')
+
+query I
+SELECT ref_name FROM ducklake.refs() WHERE ref_type = 'tag'
+----
+v2
+
+statement ok
+CALL ducklake.drop_tag('v2')
