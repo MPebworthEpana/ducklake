@@ -1,0 +1,53 @@
+# name: test/sql/branching/gc_reachability.test
+# description: H3 G2 — cleanup re-verifies reachability before unlinking
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_gc_reach', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+# Branch-only file must remain while the branch lives
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT count(*) FROM ducklake.t AT (BRANCH => 'dev')
+----
+2
+
+# After dropping the unmerged branch, cleanup may reclaim branch-only files
+statement ok
+CALL ducklake.drop_branch('dev')
+
+statement ok
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1

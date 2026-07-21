@@ -134,19 +134,25 @@ void DuckLakeCleanupExecute(ClientContext &context, TableFunctionInput &data_p, 
 		return;
 	}
 	if (!state.executed && !data.dry_run) {
-		// delete the files
+		// delete the files — re-verify reachability first (H3 G2 / P-C).
 		auto &fs = FileSystem::GetFileSystem(context);
 		vector<string> paths;
+		vector<DuckLakeFileForCleanup> still_unreachable;
 		paths.reserve(data.files.size());
+		auto &transaction = DuckLakeTransaction::Get(context, data.catalog);
+		auto &metadata_manager = transaction.GetMetadataManager();
 		for (const auto &file : data.files) {
+			if (data.type == CleanupType::OLD_FILES && metadata_manager.FileIsReachable(file.id.index)) {
+				continue;
+			}
 			paths.push_back(file.path);
+			still_unreachable.push_back(file);
 		}
-		fs.RemoveFiles(paths);
-		if (data.type == CleanupType::OLD_FILES) {
-			// If we are removing old files, we need to remove them from the catalog
-			auto &transaction = DuckLakeTransaction::Get(context, data.catalog);
-			auto &metadata_manager = transaction.GetMetadataManager();
-			metadata_manager.RemoveFilesScheduledForCleanup(data.files);
+		if (!paths.empty()) {
+			fs.RemoveFiles(paths);
+		}
+		if (data.type == CleanupType::OLD_FILES && !still_unreachable.empty()) {
+			metadata_manager.RemoveFilesScheduledForCleanup(still_unreachable);
 		}
 		state.executed = true;
 	}

@@ -1015,12 +1015,7 @@ idx_t DuckLakeCatalog::DataInliningRowLimit(SchemaIndex schema_index, TableIndex
 
 idx_t DuckLakeCatalog::DataInliningRowLimit(ClientContext &context, SchemaIndex schema_index,
                                             TableIndex table_index) const {
-	// Phase 2 M1: inlined data tables are not yet branch-scoped. Force parquet on non-main
-	// branches so inserts cannot leak across branches. Inlined deletes of inherited rows are
-	// refused separately in the delete path.
-	if (SupportsWritableBranches() && HasSessionBranch(context) && GetSessionBranchId(context) != 0) {
-		return 0;
-	}
+	// H3 G4: inlining is branch-scoped via per-branch physical table names / bookkeeping.
 	string value_str;
 	if (TryGetConfigOption("data_inlining_row_limit", value_str, schema_index, table_index)) {
 		return Value(value_str).GetValue<idx_t>();

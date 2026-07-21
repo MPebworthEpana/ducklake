@@ -6,14 +6,16 @@
 namespace duckdb {
 
 struct MergeBranchBindData : public TableFunctionData {
-	MergeBranchBindData(Catalog &catalog, string source_p, string target_p, bool dry_run_p)
-	    : catalog(catalog), source_branch(std::move(source_p)), target_branch(std::move(target_p)), dry_run(dry_run_p) {
+	MergeBranchBindData(Catalog &catalog, string source_p, string target_p, bool dry_run_p, string mode_p)
+	    : catalog(catalog), source_branch(std::move(source_p)), target_branch(std::move(target_p)), dry_run(dry_run_p),
+	      merge_tombstone_mode(std::move(mode_p)) {
 	}
 
 	Catalog &catalog;
 	string source_branch;
 	string target_branch;
 	bool dry_run;
+	string merge_tombstone_mode;
 	DuckLakeMergeBranchResult result;
 	bool computed = false;
 };
@@ -72,10 +74,16 @@ static unique_ptr<FunctionData> MergeBranchBind(ClientContext &context, TableFun
 	if (dry_entry != input.named_parameters.end() && !dry_entry->second.IsNull()) {
 		dry_run = BooleanValue::Get(dry_entry->second);
 	}
+	string merge_tombstone_mode;
+	auto mode_entry = input.named_parameters.find("merge_tombstone_mode");
+	if (mode_entry != input.named_parameters.end() && !mode_entry->second.IsNull()) {
+		merge_tombstone_mode = StringValue::Get(mode_entry->second);
+	}
 
 	string source = StringValue::Get(input.inputs[1]);
 	string target = ResolveTargetBranch(context, catalog, input);
-	return make_uniq<MergeBranchBindData>(catalog, std::move(source), std::move(target), dry_run);
+	return make_uniq<MergeBranchBindData>(catalog, std::move(source), std::move(target), dry_run,
+	                                      std::move(merge_tombstone_mode));
 }
 
 static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -85,7 +93,7 @@ static void MergeBranchExecute(ClientContext &context, TableFunctionInput &data_
 		auto &transaction = DuckLakeTransaction::Get(context, bind_data.catalog);
 		bind_data.result =
 		    transaction.GetMetadataManager().MergeBranch(bind_data.source_branch, bind_data.target_branch,
-		                                                 bind_data.dry_run);
+		                                                 bind_data.dry_run, bind_data.merge_tombstone_mode);
 		bind_data.computed = true;
 		// Advance the session branch head so subsequent reads see post-merge state.
 		if (!bind_data.dry_run && bind_data.result.merge_type != "already_up_to_date" &&
@@ -130,6 +138,7 @@ DuckLakeMergeBranchFunction::DuckLakeMergeBranchFunction()
                     MergeBranchBind, MergeBranchInit) {
 	named_parameters["target"] = LogicalType::VARCHAR;
 	named_parameters["dry_run"] = LogicalType::BOOLEAN;
+	named_parameters["merge_tombstone_mode"] = LogicalType::VARCHAR;
 }
 
 } // namespace duckdb

@@ -1,0 +1,100 @@
+# name: test/sql/branching/tombstones/merge_tombstone_modes.test
+# description: H1 — merge_tombstone_mode convert_end_snapshot (default) and reown_tombstone
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_merge_tombstone', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.keep(i INTEGER);
+
+statement ok
+CREATE TABLE ducklake.drop_me(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.keep VALUES (1);
+
+statement ok
+INSERT INTO ducklake.drop_me VALUES (9);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+DROP TABLE ducklake.drop_me
+
+statement ok
+INSERT INTO ducklake.keep VALUES (2);
+
+# Default convert mode
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('dev', target := 'main', dry_run := true)
+----
+fast_forward
+
+statement ok
+CALL ducklake.merge_branch('dev', target := 'main')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.keep ORDER BY i
+----
+1
+2
+
+statement error
+SELECT * FROM ducklake.drop_me
+----
+drop_me
+
+# Second catalog: reown_tombstone mode
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/{UUID}_reown.db' AS dl2 (DATA_PATH '{DATA_PATH}/ducklake_merge_tombstone_reown', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl2.t(i INTEGER);
+
+statement ok
+INSERT INTO dl2.t VALUES (1);
+
+statement ok
+CALL dl2.create_branch('dev')
+
+statement ok
+CALL dl2.use_branch('dev')
+
+statement ok
+ALTER TABLE dl2.t DROP COLUMN i;
+
+statement ok
+ALTER TABLE dl2.t ADD COLUMN i INTEGER;
+
+statement ok
+INSERT INTO dl2.t VALUES (42);
+
+statement ok
+CALL dl2.set_option('merge_tombstone_mode', 'reown_tombstone')
+
+statement ok
+CALL dl2.merge_branch('dev', target := 'main', merge_tombstone_mode := 'reown_tombstone')
+
+statement ok
+CALL dl2.use_branch('main')
+
+query I
+SELECT i FROM dl2.t
+----
+42

@@ -1,5 +1,7 @@
 #include "storage/ducklake_transaction_changes.hpp"
 #include "common/ducklake_util.hpp"
+#include "duckdb/catalog/catalog_entry.hpp"
+#include "duckdb/common/enums/catalog_type.hpp"
 
 namespace duckdb {
 
@@ -311,6 +313,49 @@ void MergeSnapshotChangeInformation(SnapshotChangeInformation &target, const Sna
 	MergeSet(target.tables_flushed_inlined, other.tables_flushed_inlined);
 }
 
+SnapshotChangeInformation FromTransactionChanges(const TransactionChangeInformation &changes) {
+	SnapshotChangeInformation result;
+	result.created_schemas = changes.created_schemas;
+	for (auto &entry : changes.dropped_schemas) {
+		result.dropped_schemas.insert(entry.first);
+	}
+	for (auto &schema_entry : changes.created_tables) {
+		auto &schema_name = schema_entry.first;
+		for (auto &table_ref : schema_entry.second) {
+			auto &table = table_ref.get();
+			string type = table.type == CatalogType::TABLE_ENTRY ? "table" : "view";
+			result.created_tables[schema_name].emplace(table.name.GetIdentifierName(), type);
+		}
+	}
+	for (auto &schema_entry : changes.created_scalar_macros) {
+		auto &schema_name = schema_entry.first;
+		for (auto &macro_ref : schema_entry.second) {
+			result.created_scalar_macros[schema_name].emplace(macro_ref.get().name.GetIdentifierName(), "macro");
+		}
+	}
+	for (auto &schema_entry : changes.created_table_macros) {
+		auto &schema_name = schema_entry.first;
+		for (auto &macro_ref : schema_entry.second) {
+			result.created_table_macros[schema_name].emplace(macro_ref.get().name.GetIdentifierName(), "macro");
+		}
+	}
+	result.altered_tables = changes.altered_tables;
+	result.altered_views = changes.altered_views;
+	result.dropped_tables = changes.dropped_tables;
+	result.dropped_views = changes.dropped_views;
+	result.dropped_scalar_macros = changes.dropped_scalar_macros;
+	result.dropped_table_macros = changes.dropped_table_macros;
+	result.inserted_tables = changes.tables_inserted_into;
+	result.tables_deleted_from = changes.tables_deleted_from;
+	result.tables_compacted = changes.tables_compacted;
+	result.tables_merge_adjacent = changes.tables_merge_adjacent;
+	result.tables_rewrite_delete = changes.tables_rewrite_delete;
+	result.tables_inserted_inlined = changes.tables_inserted_inlined;
+	result.tables_deleted_inlined = changes.tables_deleted_inlined;
+	result.tables_flushed_inlined = changes.tables_flushed_inlined;
+	return result;
+}
+
 vector<string> DetectConflicts(const SnapshotChangeInformation &source_changes,
                                const SnapshotChangeInformation &target_changes) {
 	vector<string> conflicts;
@@ -385,9 +430,8 @@ vector<string> DetectConflicts(const SnapshotChangeInformation &source_changes,
 	CollectCrossConflicts(conflicts, target_changes.tables_deleted_from, source_changes.inserted_tables, "deleted from",
 	                      "inserted into");
 
-	// Overlapping deletes (conservative table-level; file-level would need metadata queries)
-	CollectIndexConflicts(conflicts, source_changes.tables_deleted_from, target_changes.tables_deleted_from,
-	                      "deleted from", "overlapping deletes");
+	// Overlapping inlined deletes remain table-level; file-level parquet deletes are handled by
+	// merge callers via GetFilesDeletedOrDroppedInRange / OCC enrichment.
 	CollectIndexConflicts(conflicts, source_changes.tables_deleted_inlined, target_changes.tables_deleted_inlined,
 	                      "inlined-deleted from", "overlapping inlined deletes");
 

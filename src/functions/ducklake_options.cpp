@@ -38,6 +38,10 @@ static constexpr DuckLakeOptionMetadata DUCKLAKE_OPTIONS[] = {
     {"write_deletion_vectors", "[EXPERIMENTAL - do not use outside testing] Whether to write Iceberg V3 deletion "
                                "vectors (puffin) instead of positional delete files (parquet)"},
     {"sort_on_insert", "Whether to sort data on INSERT according to SET SORTED BY (default: true)"},
+    {"merge_tombstone_mode",
+     "How merge applies source tombstones: convert_end_snapshot (default) or reown_tombstone"},
+    {"inlining_layout",
+     "Physical layout for branch-scoped inlined data: shared_table (default) or per_branch_table"},
 };
 
 struct DuckLakeOptionsData : public TableFunctionData {

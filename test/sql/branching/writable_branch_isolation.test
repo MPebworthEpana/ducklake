@@ -98,11 +98,14 @@ SELECT * FROM ducklake.only_on_dev
 ----
 hello
 
-# Dropping an inherited table on a branch must be refused (no tombstones yet)
-statement error
+# Dropping an inherited table on a branch writes a tombstone (H1); main keeps the table
+statement ok
 DROP TABLE ducklake.base
+
+statement error
+SELECT * FROM ducklake.base
 ----
-inherited from another branch
+base
 
 # Main still has every row (full scan, not stats)
 query I con1

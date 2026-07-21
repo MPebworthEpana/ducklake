@@ -330,6 +330,7 @@ public:
 	virtual string GetInlinedTableQueries(DuckLakeSnapshot commit_snapshot, const DuckLakeTableInfo &table,
 	                                      string &inlined_tables, string &inlined_table_queries);
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version);
+	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id);
 	static string InlinedTableDdlSql(const string &table_name, const string &column_defs);
 	static string InlinedTableRegistrationTuple(idx_t table_id, const string &table_name, idx_t schema_version);
 	static string LatestInlinedTableQuery(idx_t table_id);
@@ -432,13 +433,19 @@ public:
 	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
 	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
 	//! Phase 3/4: merge source branch into target (FF when possible, else three-way).
+	//! Optional merge_tombstone_mode overrides catalog option: "convert_end_snapshot" (default) or "reown_tombstone".
 	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,
-	                                              bool dry_run);
+	                                              bool dry_run, const string &merge_tombstone_mode = string());
 	//! Snapshots visible on a branch (own + lineage-capped ancestors).
 	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());
 	//! Aggregate snapshot_changes for a branch in (after_snapshot, through_snapshot].
 	virtual SnapshotChangeInformation GetBranchChangesSince(idx_t branch_id, idx_t after_snapshot,
 	                                                        idx_t through_snapshot);
+	//! File ids deleted or dropped on a branch in (after_snapshot, through_snapshot].
+	virtual set<DataFileIndex> GetFilesDeletedOrDroppedInRange(idx_t branch_id, idx_t after_snapshot,
+	                                                           idx_t through_snapshot);
+	//! True if any active ref (branch head or tag pin) can still see the data file.
+	virtual bool FileIsReachable(idx_t data_file_id);
 	//! Common ancestor (fork / last-merge cap) of source relative to target.
 	virtual idx_t GetMergeBaseSnapshot(idx_t source_branch_id, idx_t target_branch_id);
 
@@ -514,9 +521,19 @@ protected:
 	                              const string &base_data_path, const string &separator);
 
 private:
+	//! Map a versioned metadata table to its ducklake_deletion_* tombstone table (empty if none).
+	static string DeletionTableFor(const string &metadata_table_name);
+	//! End-date branch-owned rows; INSERT tombstones for inherited rows (H1 EndDateOrTombstone).
+	static string EndDateOrTombstone(const string &metadata_table_name, const string &id_name, const string &id_list);
 	template <class T>
 	static string FlushDrop(const string &metadata_table_name, const string &id_name, const set<T> &dropped_entries,
 	                        bool enforce_branch_ownership = true);
+	//! SQL to re-own non-tombstone source metadata onto the target branch.
+	static string BuildReownNonTombstoneSQL(idx_t source_branch_id, idx_t target_branch_id);
+	//! Convert source tombstones into target end_snapshot + delete tombstone rows (default merge mode).
+	static string BuildConvertTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id, idx_t merge_snapshot);
+	//! Re-own source tombstone rows onto the target branch.
+	static string BuildReownTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id);
 	template <class T>
 	DuckLakeFileData ReadDataFile(DuckLakeTableEntry &table, T &row, idx_t &col_idx, bool is_encrypted);
 	template <class T>

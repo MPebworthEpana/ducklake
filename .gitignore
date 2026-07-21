@@ -12,3 +12,7 @@ duckdb_benchmark_data/
 vcpkg/
 
 .cache/
+
+# local vcpkg (build dependency)
+/vcpkg-tool/
+/vcpkg_installed/
