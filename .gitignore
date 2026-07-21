@@ -10,3 +10,5 @@ test/python/__pycache__/
 scripts/data/
 duckdb_benchmark_data/
 vcpkg/
+
+.cache/
