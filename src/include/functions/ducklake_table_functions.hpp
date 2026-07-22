@@ -146,6 +146,11 @@ public:
 	DuckLakeMergeBranchFunction();
 };
 
+class DuckLakeCherryPickFunction : public TableFunction {
+public:
+	DuckLakeCherryPickFunction();
+};
+
 class DuckLakeConvertInliningLayoutFunction : public TableFunction {
 public:
 	DuckLakeConvertInliningLayoutFunction();

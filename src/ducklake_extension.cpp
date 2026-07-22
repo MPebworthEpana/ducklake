@@ -112,6 +112,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeMergeBranchFunction merge_branch;
 	loader.RegisterFunction(merge_branch);
 
+	DuckLakeCherryPickFunction cherry_pick;
+	loader.RegisterFunction(cherry_pick);
+
 	DuckLakeConvertInliningLayoutFunction convert_inlining_layout;
 	loader.RegisterFunction(convert_inlining_layout);
 

@@ -1165,6 +1165,43 @@ DELETE FROM {METADATA_CATALOG}.%s WHERE branch_id = %llu;
 	return sql;
 }
 
+namespace {
+
+static bool CreatedMapEmpty(const case_insensitive_map_t<case_insensitive_map_t<string>> &entries) {
+	for (auto &entry : entries) {
+		if (!entry.second.empty()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static string CherryPickUnsupportedReason(const SnapshotChangeInformation &changes) {
+	if (!changes.created_schemas.empty() || !changes.dropped_schemas.empty() ||
+	    !CreatedMapEmpty(changes.created_tables) || !CreatedMapEmpty(changes.created_scalar_macros) ||
+	    !CreatedMapEmpty(changes.created_table_macros) || !changes.altered_tables.empty() ||
+	    !changes.altered_views.empty() || !changes.dropped_tables.empty() || !changes.dropped_views.empty() ||
+	    !changes.dropped_scalar_macros.empty() || !changes.dropped_table_macros.empty()) {
+		return "DDL changes";
+	}
+	if (!changes.tables_inserted_inlined.empty() || !changes.tables_deleted_inlined.empty() ||
+	    !changes.tables_flushed_inlined.empty()) {
+		return "inlined-data changes";
+	}
+	if (!changes.tables_compacted.empty() || !changes.tables_merge_adjacent.empty() ||
+	    !changes.tables_rewrite_delete.empty()) {
+		return "compaction changes";
+	}
+	return string();
+}
+
+static void AddChangedTables(set<TableIndex> &tables, const SnapshotChangeInformation &changes) {
+	tables.insert(changes.inserted_tables.begin(), changes.inserted_tables.end());
+	tables.insert(changes.tables_deleted_from.begin(), changes.tables_deleted_from.end());
+}
+
+} // namespace
+
 DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &source_branch,
                                                                const string &target_branch, bool dry_run,
                                                                const string &merge_tombstone_mode) {
@@ -1401,6 +1438,390 @@ UPDATE {METADATA_CATALOG}.ducklake_ref SET snapshot_id = %llu WHERE ref_id = %ll
 	result.messages.push_back(StringUtil::Format("New target head: %llu", new_head));
 	result.target_branch_id = target_ref.ref_id;
 	result.source_branch_id = source_ref.ref_id;
+	return result;
+}
+
+DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &source_branch, idx_t snapshot_id,
+                                                             const string &target_branch, bool dry_run) {
+	if (!transaction.GetCatalog().SupportsWritableBranches()) {
+		throw InvalidInputException(
+		    "ducklake_cherry_pick requires DuckLake catalog version >= 1.1-dev3. "
+		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+	}
+	DuckLakeRefInfo source_ref;
+	DuckLakeRefInfo target_ref;
+	if (!TryResolveRef(source_branch, "branch", source_ref)) {
+		throw InvalidInputException("No branch named \"%s\" exists", source_branch);
+	}
+	if (!TryResolveRef(target_branch, "branch", target_ref)) {
+		throw InvalidInputException("No branch named \"%s\" exists", target_branch);
+	}
+	if (source_ref.ref_id == target_ref.ref_id) {
+		throw InvalidInputException("Cannot cherry-pick from branch \"%s\" onto itself", source_branch);
+	}
+
+	DuckLakeCherryPickResult result;
+	result.cherry_pick_type = "cherry_pick";
+	result.source_branch = source_ref.ref_name;
+	result.target_branch = target_ref.ref_name;
+	result.source_snapshot = snapshot_id;
+	result.source_head = source_ref.snapshot_id;
+	result.target_head = target_ref.snapshot_id;
+	result.new_target_head = target_ref.snapshot_id;
+	result.source_branch_id = source_ref.ref_id;
+	result.target_branch_id = target_ref.ref_id;
+	result.dry_run = dry_run;
+	result.ancestor_snapshot = GetMergeBaseSnapshot(source_ref.ref_id, target_ref.ref_id);
+
+	auto picked_snapshots =
+	    GetAllSnapshots(StringUtil::Format("s.snapshot_id = %llu AND s.branch_id = %llu", snapshot_id,
+	                                       source_ref.ref_id));
+	if (picked_snapshots.empty()) {
+		throw InvalidInputException("Snapshot %llu does not belong to source branch \"%s\"", snapshot_id,
+		                            source_ref.ref_name);
+	}
+	if (snapshot_id > source_ref.snapshot_id) {
+		throw InvalidInputException("Snapshot %llu is beyond source branch \"%s\" head %llu", snapshot_id,
+		                            source_ref.ref_name, source_ref.snapshot_id);
+	}
+	auto &picked = picked_snapshots[0];
+	auto source_delta = SnapshotChangeInformation::ParseChangesMade(picked.change_info.changes_made);
+	auto unsupported = CherryPickUnsupportedReason(source_delta);
+	if (!unsupported.empty()) {
+		throw NotImplementedException(
+		    "ducklake_cherry_pick currently supports DML data-file inserts/deletes only; snapshot %llu contains %s",
+		    snapshot_id, unsupported);
+	}
+
+	auto target_delta = GetBranchChangesSince(target_ref.ref_id, result.ancestor_snapshot, target_ref.snapshot_id);
+	auto conflicts = DetectConflicts(source_delta, target_delta, ConflictReportStyle::MERGE);
+	bool both_deleted = false;
+	for (auto &table_id : source_delta.tables_deleted_from) {
+		if (target_delta.tables_deleted_from.find(table_id) != target_delta.tables_deleted_from.end()) {
+			both_deleted = true;
+			break;
+		}
+	}
+	if (both_deleted) {
+		auto source_files =
+		    GetFilesDeletedOrDroppedInRange(source_ref.ref_id, snapshot_id == 0 ? 0 : snapshot_id - 1, snapshot_id);
+		auto target_files =
+		    GetFilesDeletedOrDroppedInRange(target_ref.ref_id, result.ancestor_snapshot, target_ref.snapshot_id);
+		for (auto &file_id : source_files) {
+			if (target_files.find(file_id) != target_files.end()) {
+				conflicts.push_back(
+				    StringUtil::Format("overlapping file-level deletes on file %llu", file_id.index));
+			}
+		}
+	}
+	if (!conflicts.empty()) {
+		result.cherry_pick_type = "conflicts";
+		result.messages = std::move(conflicts);
+		if (!dry_run) {
+			throw TransactionException("Cherry-pick conflict applying snapshot %llu from branch \"%s\" onto \"%s\":\n%s",
+			                           snapshot_id, source_branch, target_branch, StringUtil::Join(result.messages, "\n"));
+		}
+		return result;
+	}
+
+	auto read_snapshot = [&](idx_t id, idx_t branch_id, const char *what) {
+		auto snap_q = Query(StringUtil::Format(
+		    R"(SELECT schema_version, next_catalog_id, next_file_id FROM {METADATA_CATALOG}.ducklake_snapshot
+WHERE snapshot_id = %llu)",
+		    id));
+		if (snap_q->HasError()) {
+			snap_q->GetErrorObject().Throw(StringUtil::Format("Failed to read %s snapshot for cherry-pick: ", what));
+		}
+		DuckLakeSnapshot snapshot;
+		bool found = false;
+		for (auto &row : *snap_q) {
+			snapshot.snapshot_id = id;
+			snapshot.schema_version = row.GetValue<idx_t>(0);
+			snapshot.next_catalog_id = row.GetValue<idx_t>(1);
+			snapshot.next_file_id = row.GetValue<idx_t>(2);
+			snapshot.branch_id = branch_id;
+			found = true;
+		}
+		if (!found) {
+			throw InvalidInputException("%s snapshot %llu is missing", what, id);
+		}
+		return snapshot;
+	};
+	auto target_snapshot = read_snapshot(target_ref.snapshot_id, target_ref.ref_id, "target head");
+
+	auto check_table_visible = [&](TableIndex table_id) {
+		auto visible = Query(target_snapshot, StringUtil::Format(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_table tbl
+WHERE tbl.table_id = %llu AND {VISIBLE_TABLE}
+LIMIT 1
+)",
+		                                                       table_id.index));
+		if (visible->HasError()) {
+			visible->GetErrorObject().Throw("Failed to verify cherry-pick table dependency: ");
+		}
+		for (auto &row : *visible) {
+			(void)row;
+			return;
+		}
+		throw InvalidInputException(
+		    "Cannot cherry-pick snapshot %llu: table %llu is not visible on target branch \"%s\" at snapshot %llu",
+		    snapshot_id, table_id.index, target_ref.ref_name, target_ref.snapshot_id);
+	};
+	auto check_data_file_visible = [&](idx_t data_file_id) {
+		auto visible = Query(target_snapshot, StringUtil::Format(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_data_file data
+WHERE data.data_file_id = %llu AND {VISIBLE_DATA_FILE}
+LIMIT 1
+)",
+		                                                       data_file_id));
+		if (visible->HasError()) {
+			visible->GetErrorObject().Throw("Failed to verify cherry-pick data-file dependency: ");
+		}
+		for (auto &row : *visible) {
+			(void)row;
+			return;
+		}
+		throw InvalidInputException(
+		    "Cannot cherry-pick snapshot %llu: source delete depends on data file %llu, which is not visible on target "
+		    "branch \"%s\" at snapshot %llu",
+		    snapshot_id, data_file_id, target_ref.ref_name, target_ref.snapshot_id);
+	};
+
+	set<TableIndex> touched_tables;
+	AddChangedTables(touched_tables, source_delta);
+	for (auto &table_id : touched_tables) {
+		check_table_visible(table_id);
+	}
+
+	auto missing_delete_dependencies = Query(StringUtil::Format(R"(
+SELECT DISTINCT df.data_file_id
+FROM {METADATA_CATALOG}.ducklake_delete_file df
+WHERE df.branch_id = %llu AND df.begin_snapshot = %llu
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_data_file data
+    WHERE data.branch_id = %llu AND data.begin_snapshot = %llu AND data.data_file_id = df.data_file_id
+  )
+UNION
+SELECT DISTINCT del.object_id
+FROM {METADATA_CATALOG}.ducklake_deletion_data_file del
+WHERE del.branch_id = %llu AND del.deleted_at_snapshot = %llu
+UNION
+SELECT DISTINCT data.data_file_id
+FROM {METADATA_CATALOG}.ducklake_data_file data
+WHERE data.branch_id = %llu AND data.end_snapshot = %llu AND data.begin_snapshot <> %llu
+)",
+	                                                    source_ref.ref_id, snapshot_id, source_ref.ref_id, snapshot_id,
+	                                                    source_ref.ref_id, snapshot_id, source_ref.ref_id, snapshot_id,
+	                                                    snapshot_id));
+	if (missing_delete_dependencies->HasError()) {
+		missing_delete_dependencies->GetErrorObject().Throw("Failed to inspect cherry-pick delete dependencies: ");
+	}
+	for (auto &row : *missing_delete_dependencies) {
+		check_data_file_visible(row.GetValue<idx_t>(0));
+	}
+
+	result.messages.push_back(StringUtil::Format("Cherry-pick snapshot: %llu", snapshot_id));
+	result.messages.push_back(StringUtil::Format("Source branch: %s", source_ref.ref_name));
+	result.messages.push_back(StringUtil::Format("Target branch: %s", target_ref.ref_name));
+	result.messages.push_back(StringUtil::Format("Ancestor snapshot: %llu", result.ancestor_snapshot));
+	result.messages.push_back(StringUtil::Format("Target head: %llu", target_ref.snapshot_id));
+	if (dry_run) {
+		result.messages.push_back("dry_run=true - no metadata changes applied");
+		return result;
+	}
+
+	auto count_q = Query(StringUtil::Format(R"(
+SELECT
+  (SELECT COUNT(*) FROM {METADATA_CATALOG}.ducklake_data_file
+   WHERE branch_id = %llu AND begin_snapshot = %llu),
+  (SELECT COUNT(*) FROM {METADATA_CATALOG}.ducklake_delete_file
+   WHERE branch_id = %llu AND begin_snapshot = %llu),
+  (SELECT COALESCE(MAX(data_file_id) + 1, 0) FROM {METADATA_CATALOG}.ducklake_data_file),
+  (SELECT COALESCE(MAX(delete_file_id) + 1, 0) FROM {METADATA_CATALOG}.ducklake_delete_file)
+)",
+	                                       source_ref.ref_id, snapshot_id, source_ref.ref_id, snapshot_id));
+	if (count_q->HasError()) {
+		count_q->GetErrorObject().Throw("Failed to size cherry-pick file remapping: ");
+	}
+	auto count_row = count_q->Fetch();
+	idx_t data_file_count = count_row->GetValue(0, 0).GetValue<idx_t>();
+	idx_t delete_file_count = count_row->GetValue(1, 0).GetValue<idx_t>();
+	auto next_data_file_id = count_row->GetValue(2, 0).GetValue<idx_t>();
+	auto next_delete_file_id = count_row->GetValue(3, 0).GetValue<idx_t>();
+	idx_t next_file_id = MaxValue<idx_t>(target_snapshot.next_file_id, next_data_file_id);
+	next_file_id = MaxValue<idx_t>(next_file_id, next_delete_file_id);
+	idx_t data_file_base = next_file_id;
+	idx_t delete_file_base = data_file_base + data_file_count;
+	idx_t new_next_file_id = delete_file_base + delete_file_count;
+
+	auto id_q = Query("SELECT COALESCE(MAX(snapshot_id), -1) + 1 FROM {METADATA_CATALOG}.ducklake_snapshot");
+	if (id_q->HasError()) {
+		id_q->GetErrorObject().Throw("Failed to allocate cherry-pick snapshot id: ");
+	}
+	idx_t new_head = 0;
+	for (auto &row : *id_q) {
+		new_head = row.GetValue<idx_t>(0);
+	}
+
+	string extra = StringUtil::Format("cherry_pick_source=%s,cherry_pick_snapshot=%llu", source_ref.ref_name,
+	                                  snapshot_id);
+	auto insert_snapshot = Execute(StringUtil::Format(
+	    R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_snapshot
+VALUES (%llu, NOW(), %llu, %llu, %llu, %llu);
+INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes
+VALUES (%llu, %s, NULL, %s, %s);
+)",
+	    new_head, target_snapshot.schema_version, target_snapshot.next_catalog_id, new_next_file_id, target_ref.ref_id,
+	    new_head, SQLString(picked.change_info.changes_made),
+	    SQLString(StringUtil::Format("Cherry-pick snapshot %llu from branch %s", snapshot_id, source_ref.ref_name)),
+	    SQLString(extra)));
+	if (insert_snapshot->HasError()) {
+		insert_snapshot->GetErrorObject().Throw("Failed to insert DuckLake cherry-pick snapshot: ");
+	}
+
+	auto apply_sql = StringUtil::Format(
+	    R"(
+DROP TABLE IF EXISTS __ducklake_cherry_pick_data_file_map;
+DROP TABLE IF EXISTS __ducklake_cherry_pick_delete_file_map;
+CREATE TEMP TABLE __ducklake_cherry_pick_data_file_map AS
+SELECT data_file_id AS old_data_file_id,
+       CAST(%llu AS BIGINT) + ROW_NUMBER() OVER (ORDER BY data_file_id) - 1 AS new_data_file_id
+FROM {METADATA_CATALOG}.ducklake_data_file
+WHERE branch_id = %llu AND begin_snapshot = %llu;
+CREATE TEMP TABLE __ducklake_cherry_pick_delete_file_map AS
+SELECT delete_file_id AS old_delete_file_id,
+       CAST(%llu AS BIGINT) + ROW_NUMBER() OVER (ORDER BY delete_file_id) - 1 AS new_delete_file_id
+FROM {METADATA_CATALOG}.ducklake_delete_file
+WHERE branch_id = %llu AND begin_snapshot = %llu;
+
+INSERT INTO {METADATA_CATALOG}.ducklake_data_file(
+    data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative,
+    file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id,
+    encryption_key, mapping_id, partial_max, row_group_count, branch_id)
+SELECT map.new_data_file_id, data.table_id, %llu, NULL, data.file_order, data.path, data.path_is_relative,
+       data.file_format, data.record_count, data.file_size_bytes, data.footer_size, data.row_id_start,
+       data.partition_id, data.encryption_key, data.mapping_id, data.partial_max, data.row_group_count, %llu
+FROM {METADATA_CATALOG}.ducklake_data_file data
+JOIN __ducklake_cherry_pick_data_file_map map ON map.old_data_file_id = data.data_file_id;
+INSERT INTO {METADATA_CATALOG}.ducklake_file_column_stats
+SELECT map.new_data_file_id, stats.table_id, stats.column_id, stats.column_size_bytes, stats.value_count,
+       stats.null_count, stats.min_value, stats.max_value, stats.contains_nan, stats.extra_stats
+FROM {METADATA_CATALOG}.ducklake_file_column_stats stats
+JOIN __ducklake_cherry_pick_data_file_map map ON map.old_data_file_id = stats.data_file_id;
+INSERT INTO {METADATA_CATALOG}.ducklake_file_variant_stats
+SELECT map.new_data_file_id, stats.table_id, stats.column_id, stats.variant_path, stats.shredded_type,
+       stats.column_size_bytes, stats.value_count, stats.null_count, stats.min_value, stats.max_value,
+       stats.contains_nan, stats.extra_stats
+FROM {METADATA_CATALOG}.ducklake_file_variant_stats stats
+JOIN __ducklake_cherry_pick_data_file_map map ON map.old_data_file_id = stats.data_file_id;
+INSERT INTO {METADATA_CATALOG}.ducklake_file_partition_value
+SELECT map.new_data_file_id, part.table_id, part.partition_key_index, part.partition_value
+FROM {METADATA_CATALOG}.ducklake_file_partition_value part
+JOIN __ducklake_cherry_pick_data_file_map map ON map.old_data_file_id = part.data_file_id;
+
+INSERT INTO {METADATA_CATALOG}.ducklake_delete_file(
+    delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id, path, path_is_relative,
+    format, delete_count, file_size_bytes, footer_size, encryption_key, partial_max, row_group_count,
+    branch_id, data_file_branch_id)
+SELECT delmap.new_delete_file_id, del.table_id, %llu, NULL,
+       COALESCE(datamap.new_data_file_id, del.data_file_id), del.path, del.path_is_relative,
+       del.format, del.delete_count, del.file_size_bytes, del.footer_size, del.encryption_key,
+       del.partial_max, del.row_group_count, %llu,
+       CASE WHEN datamap.new_data_file_id IS NULL THEN del.data_file_branch_id ELSE %llu END
+FROM {METADATA_CATALOG}.ducklake_delete_file del
+JOIN __ducklake_cherry_pick_delete_file_map delmap ON delmap.old_delete_file_id = del.delete_file_id
+LEFT JOIN __ducklake_cherry_pick_data_file_map datamap ON datamap.old_data_file_id = del.data_file_id;
+
+INSERT INTO {METADATA_CATALOG}.ducklake_deletion_data_file
+  (branch_id, ancestor_branch_id, object_id, deleted_at_snapshot)
+SELECT %llu, del.ancestor_branch_id, del.object_id, %llu
+FROM {METADATA_CATALOG}.ducklake_deletion_data_file del
+WHERE del.branch_id = %llu AND del.deleted_at_snapshot = %llu
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_deletion_data_file existing
+    WHERE existing.branch_id = %llu AND existing.ancestor_branch_id = del.ancestor_branch_id
+      AND existing.object_id = del.object_id AND existing.deleted_at_snapshot <= %llu
+  );
+INSERT INTO {METADATA_CATALOG}.ducklake_deletion_delete_file
+  (branch_id, ancestor_branch_id, object_id, deleted_at_snapshot)
+SELECT %llu, del.ancestor_branch_id, del.object_id, %llu
+FROM {METADATA_CATALOG}.ducklake_deletion_delete_file del
+WHERE del.branch_id = %llu AND del.deleted_at_snapshot = %llu
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_deletion_delete_file existing
+    WHERE existing.branch_id = %llu AND existing.ancestor_branch_id = del.ancestor_branch_id
+      AND existing.object_id = del.object_id AND existing.deleted_at_snapshot <= %llu
+  );
+)",
+	    data_file_base, source_ref.ref_id, snapshot_id, delete_file_base, source_ref.ref_id, snapshot_id, new_head,
+	    target_ref.ref_id, new_head, target_ref.ref_id, target_ref.ref_id, target_ref.ref_id, new_head,
+	    source_ref.ref_id, snapshot_id, target_ref.ref_id, new_head, target_ref.ref_id, new_head, source_ref.ref_id,
+	    snapshot_id, target_ref.ref_id, new_head);
+	auto apply = Execute(apply_sql);
+	if (apply->HasError()) {
+		apply->GetErrorObject().Throw("Failed to apply DuckLake cherry-pick metadata: ");
+	}
+
+	if (!touched_tables.empty()) {
+		string table_values;
+		for (auto &table_id : touched_tables) {
+			if (!table_values.empty()) {
+				table_values += ", ";
+			}
+			table_values += StringUtil::Format("(%llu)", table_id.index);
+		}
+		auto stats = Execute(StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_table_stats(table_id, record_count, next_row_id, file_size_bytes, branch_id)
+SELECT t.table_id, 0, 0, 0, %llu
+FROM (VALUES %s) AS t(table_id)
+WHERE NOT EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats stats
+  WHERE stats.table_id = t.table_id AND stats.branch_id = %llu
+);
+UPDATE {METADATA_CATALOG}.ducklake_table_stats stats
+SET record_count = GREATEST(0, stats.record_count
+    + COALESCE((SELECT SUM(data.record_count) FROM {METADATA_CATALOG}.ducklake_data_file data
+                WHERE data.branch_id = %llu AND data.begin_snapshot = %llu
+                  AND data.table_id = stats.table_id), 0)
+    - COALESCE((SELECT SUM(del.delete_count) FROM {METADATA_CATALOG}.ducklake_delete_file del
+                WHERE del.branch_id = %llu AND del.begin_snapshot = %llu
+                  AND del.table_id = stats.table_id), 0)),
+    file_size_bytes = GREATEST(0, stats.file_size_bytes
+    + COALESCE((SELECT SUM(data.file_size_bytes) FROM {METADATA_CATALOG}.ducklake_data_file data
+                WHERE data.branch_id = %llu AND data.begin_snapshot = %llu
+                  AND data.table_id = stats.table_id), 0)),
+    next_row_id = GREATEST(stats.next_row_id,
+    COALESCE((SELECT MAX(COALESCE(data.row_id_start, 0) + data.record_count)
+              FROM {METADATA_CATALOG}.ducklake_data_file data
+              WHERE data.branch_id = %llu AND data.begin_snapshot = %llu
+                AND data.table_id = stats.table_id), stats.next_row_id))
+WHERE stats.branch_id = %llu
+  AND stats.table_id IN (SELECT table_id FROM (VALUES %s) AS t(table_id));
+)",
+		                                         target_ref.ref_id, table_values, target_ref.ref_id, target_ref.ref_id,
+		                                         new_head, target_ref.ref_id, new_head, target_ref.ref_id, new_head,
+		                                         target_ref.ref_id, new_head, target_ref.ref_id, table_values));
+		if (stats->HasError()) {
+			stats->GetErrorObject().Throw("Failed to update DuckLake cherry-pick table stats: ");
+		}
+	}
+
+	UpdateBranchHead(target_ref.ref_id, target_ref.snapshot_id, new_head);
+
+	auto cleanup = Execute(
+	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_data_file_map; "
+	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_delete_file_map;");
+	if (cleanup->HasError()) {
+		cleanup->GetErrorObject().Throw("Failed to clean up DuckLake cherry-pick temp tables: ");
+	}
+
+	result.new_target_head = new_head;
+	result.messages.push_back(StringUtil::Format("New target head: %llu", new_head));
+	result.messages.push_back(StringUtil::Format("Copied data files: %llu", data_file_count));
+	result.messages.push_back(StringUtil::Format("Copied delete files: %llu", delete_file_count));
 	return result;
 }
 

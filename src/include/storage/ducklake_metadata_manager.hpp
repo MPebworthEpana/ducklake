@@ -445,6 +445,9 @@ public:
 	//! Optional merge_tombstone_mode overrides catalog option: "convert_end_snapshot" (default) or "reown_tombstone".
 	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,
 	                                              bool dry_run, const string &merge_tombstone_mode = string());
+	//! Phase 5: apply exactly one source branch snapshot as a new target branch snapshot.
+	virtual DuckLakeCherryPickResult CherryPick(const string &source_branch, idx_t snapshot_id,
+	                                            const string &target_branch, bool dry_run);
 	virtual DuckLakeConvertInliningLayoutResult ConvertInliningLayout(const string &target_layout, bool dry_run);
 	//! Snapshots visible on a branch (own + lineage-capped ancestors).
 	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());

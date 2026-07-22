@@ -1,0 +1,102 @@
+# name: test/sql/branching/cherry_pick.test
+# description: Phase 5 T1 — single-snapshot cherry-pick
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_cherry_pick', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+INSERT INTO ducklake.t VALUES (3);
+
+# dry_run reports the pick and does not advance the target head
+statement ok
+CREATE TEMP TABLE main_head_before AS
+SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main';
+
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main', dry_run := true)
+----
+cherry_pick
+
+query I
+SELECT CASE WHEN (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main') =
+                 (SELECT snapshot_id FROM main_head_before)
+            THEN 1 ELSE 0 END
+----
+1
+
+# Apply only the first dev snapshot, leaving dev's later insert off main
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main')
+----
+cherry_pick
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+2
+
+query I
+SELECT CASE WHEN commit_extra_info LIKE '%cherry_pick_source=dev%' AND
+                 commit_extra_info LIKE '%cherry_pick_snapshot=3%'
+            THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main')
+----
+1
+
+# Source DML conflicts with target-side schema evolution
+statement ok
+CALL ducklake.create_branch('conflict_dev')
+
+statement ok
+CALL ducklake.use_branch('conflict_dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (9);
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+ALTER TABLE ducklake.t ADD COLUMN j INTEGER;
+
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('conflict_dev', 6::UBIGINT, target := 'main', dry_run := true)
+----
+conflicts
+
+statement error
+SELECT * FROM ducklake.cherry_pick('conflict_dev', 6::UBIGINT, target := 'main')
+----
+Cherry-pick conflict
