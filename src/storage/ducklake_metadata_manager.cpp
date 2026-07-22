@@ -7639,11 +7639,14 @@ void DuckLakeMetadataManager::DeleteFlushedInlinedData(const DuckLakeInlinedTabl
                                                        idx_t flush_snapshot_id) {
 	const bool shared_layout =
 	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	string branch_filter;
+	if (shared_layout) {
+		branch_filter = StringUtil::Format(" AND branch_id = %llu", transaction.GetSnapshot().branch_id);
+	}
 	auto result = Execute(StringUtil::Format(R"(
 		DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d%s
 )",
-	                                         SQLIdentifier(inlined_table.table_name), flush_snapshot_id,
-	                                         shared_layout ? " AND branch_id = {BRANCH_ID}" : ""));
+	                                         SQLIdentifier(inlined_table.table_name), flush_snapshot_id, branch_filter));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to delete flushed inlined data in DuckLake from table " +
 		                               inlined_table.table_name + ": ");
