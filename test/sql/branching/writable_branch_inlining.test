@@ -1,5 +1,5 @@
 # name: test/sql/branching/writable_branch_inlining.test
-# description: Phase 2 — inlining disabled on non-main branches; inserts stay isolated
+# description: H3 G4 — inlining enabled on non-main branches with per-branch isolation
 # group: [branching]
 
 require ducklake
@@ -61,3 +61,20 @@ SELECT * FROM ducklake.t ORDER BY i
 ----
 1
 100
+
+# Branch-local inlined rows remain after another branch-local insert
+statement ok
+INSERT INTO ducklake.t VALUES (101);
+
+query I
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+100
+101
+
+query I con1
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+2

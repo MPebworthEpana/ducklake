@@ -163,6 +163,20 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
 	} else if (option == "sort_on_insert") {
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
+	} else if (option == "merge_tombstone_mode") {
+		auto mode = StringUtil::Lower(val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (mode != "convert_end_snapshot" && mode != "reown_tombstone") {
+			throw InvalidInputException(
+			    "merge_tombstone_mode must be 'convert_end_snapshot' or 'reown_tombstone', got \"%s\"", mode);
+		}
+		value = mode;
+	} else if (option == "inlining_layout") {
+		auto mode = StringUtil::Lower(val.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		if (mode != "shared_table" && mode != "per_branch_table") {
+			throw InvalidInputException("inlining_layout must be 'shared_table' or 'per_branch_table', got \"%s\"",
+			                            mode);
+		}
+		value = mode;
 	} else {
 		throw NotImplementedException("Unsupported option %s", option);
 	}
@@ -178,7 +192,9 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 	if (table_entry != input.named_parameters.end() && !table_entry->second.IsNull()) {
 		table = StringValue::Get(table_entry->second);
 	}
-	if ((!table.empty() || !schema.empty()) && (option == "expire_older_than" || option == "delete_older_than")) {
+	if ((!table.empty() || !schema.empty()) &&
+	    (option == "expire_older_than" || option == "delete_older_than" || option == "merge_tombstone_mode" ||
+	     option == "inlining_layout")) {
 		throw InvalidInputException("The '%s' option can only be set globally, not for a specific schema or table",
 		                            option);
 	}

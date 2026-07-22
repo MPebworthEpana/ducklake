@@ -1,0 +1,97 @@
+# name: test/sql/branching/merge_file_level_deletes.test
+# description: H2 G5 — disjoint same-table file deletes merge; overlapping conflict
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_merge_file_del', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+# Two separate files on main
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.create_branch('other')
+
+# Disjoint deletes: each branch deletes a different file's rows
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+DELETE FROM ducklake.t WHERE i = 1;
+
+statement ok
+CALL ducklake.use_branch('other')
+
+statement ok
+DELETE FROM ducklake.t WHERE i = 2;
+
+# Merge first branch into main
+statement ok
+CALL ducklake.merge_branch('dev', target := 'main')
+
+# Second branch should three-way merge cleanly (disjoint file deletes)
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('other', target := 'main', dry_run := true)
+----
+three_way
+
+statement ok
+CALL ducklake.merge_branch('other', target := 'main')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT count(*) FROM ducklake.t
+----
+0
+
+# Overlapping deletes conflict
+statement ok
+INSERT INTO ducklake.t VALUES (10), (11);
+
+statement ok
+CALL ducklake.create_branch('c1')
+
+statement ok
+CALL ducklake.create_branch('c2')
+
+statement ok
+CALL ducklake.use_branch('c1')
+
+statement ok
+DELETE FROM ducklake.t WHERE i = 10;
+
+statement ok
+CALL ducklake.use_branch('c2')
+
+statement ok
+DELETE FROM ducklake.t WHERE i = 10;
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CALL ducklake.merge_branch('c1', target := 'main')
+
+query I
+SELECT DISTINCT merge_type FROM ducklake.merge_branch('c2', target := 'main', dry_run := true)
+----
+conflicts

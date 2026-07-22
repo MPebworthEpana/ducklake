@@ -509,15 +509,20 @@ void DuckLakeDelete::FlushDelete(DuckLakeTransaction &transaction, ClientContext
 		return;
 	}
 	if (data_file_info.data_type == DuckLakeDataType::INLINED_DATA) {
-		// deletes from inlined data are not written to a file but pushed directly into the metadata manager
+		// deletes from inlined data are not written to a file but pushed directly into the metadata manager.
+		// Branch-local inlined tables (…_b{branch}) are safe; inherited main inlined rows still require
+		// copy-on-write / tombstones — refuse those by table name heuristic.
 		auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
 		if (catalog.SupportsWritableBranches()) {
 			auto &tx = DuckLakeTransaction::Get(context, catalog);
 			if (tx.HasActiveBranch() && tx.GetActiveBranchId() != 0) {
-				throw NotImplementedException(
-				    "Deleting inlined rows on a non-main branch is not supported until branch-scoped "
-				    "inlined data (Phase 2 M3/M4) is implemented; flush inlined data to Parquet first "
-				    "or delete from main");
+				auto &path = data_file_info.file.path;
+				string branch_suffix = "_b" + to_string(tx.GetActiveBranchId());
+				if (!StringUtil::EndsWith(path, branch_suffix) && path.find("_b") == string::npos) {
+					throw NotImplementedException(
+					    "Deleting inherited inlined rows on a non-main branch is not supported; "
+					    "flush inlined data to Parquet first or delete branch-local inlined rows only");
+				}
 			}
 		}
 		transaction.AddNewInlinedDeletes(table.GetTableId(), data_file_info.file.path, std::move(sorted_deletes));

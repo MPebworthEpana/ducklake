@@ -18,7 +18,7 @@ static const DefaultTableMacro ducklake_table_macros[] = {
 	{DEFAULT_SCHEMA, "drop_tag", {"name", nullptr}, {{nullptr, nullptr}},  "FROM ducklake_drop_tag({CATALOG}, name)"},
 	{DEFAULT_SCHEMA, "refs", {nullptr}, {{nullptr, nullptr}},  "FROM ducklake_refs({CATALOG})"},
 	{DEFAULT_SCHEMA, "use_branch", {"name", nullptr}, {{nullptr, nullptr}},  "FROM ducklake_use_branch({CATALOG}, name)"},
-	{DEFAULT_SCHEMA, "merge_branch", {"source", nullptr}, {{"target", "NULL"}, {"dry_run", "false"}, {nullptr, nullptr}},  "FROM ducklake_merge_branch({CATALOG}, source, target => target, dry_run => dry_run)"},
+	{DEFAULT_SCHEMA, "merge_branch", {"source", nullptr}, {{"target", "NULL"}, {"dry_run", "false"}, {"merge_tombstone_mode", "NULL"}, {nullptr, nullptr}},  "FROM ducklake_merge_branch({CATALOG}, source, target => target, dry_run => dry_run, merge_tombstone_mode => merge_tombstone_mode)"},
 	{DEFAULT_SCHEMA, "options", {nullptr}, {{nullptr, nullptr}}, "FROM ducklake_options({CATALOG})"},
 	{DEFAULT_SCHEMA, "settings", {nullptr}, {{nullptr, nullptr}}, "FROM ducklake_settings({CATALOG})"},
 	{DEFAULT_SCHEMA, "current_snapshot", {nullptr}, {{nullptr, nullptr}},  "FROM ducklake_current_snapshot({CATALOG})"},

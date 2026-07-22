@@ -1,0 +1,66 @@
+# name: test/sql/branching/tombstones/drop_inherited.test
+# description: H1 — inherited DROP table/column tombstones; parent and sibling visibility
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_tombstone_drop', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER, j INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1, 10), (2, 20);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.create_branch('sibling')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+ALTER TABLE ducklake.t DROP COLUMN j;
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+2
+
+statement ok
+DROP TABLE ducklake.t
+
+statement error
+SELECT * FROM ducklake.t
+----
+t
+
+# Parent still sees full table
+statement ok con1
+CALL ducklake.use_branch('main')
+
+query II con1
+SELECT i, j FROM ducklake.t ORDER BY i
+----
+1	10
+2	20
+
+# Sibling still sees full table
+statement ok con2
+CALL ducklake.use_branch('sibling')
+
+query II con2
+SELECT i, j FROM ducklake.t ORDER BY i
+----
+1	10
+2	20

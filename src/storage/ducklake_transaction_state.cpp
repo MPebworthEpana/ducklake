@@ -143,40 +143,24 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
                                                  const SnapshotChangeInformation &other_changes,
                                                  DuckLakeSnapshot transaction_snapshot,
                                                  const std::function<unique_ptr<QueryResult>(string)> &executor) const {
-	// check if we are dropping the same table as another transaction
-	for (auto &dropped_idx : changes.dropped_tables) {
-		ConflictCheck(dropped_idx, other_changes.dropped_tables, "drop table", "dropped it already");
+	// H2 G3: shared taxonomy via DetectConflicts, then OCC-only enrichments below.
+	auto local_as_snapshot = FromTransactionChanges(changes);
+	auto shared_conflicts = DetectConflicts(local_as_snapshot, other_changes);
+	if (!shared_conflicts.empty()) {
+		throw TransactionException("Transaction conflict - %s", StringUtil::Join(shared_conflicts, "; "));
 	}
-	// check if we are dropping the same view as another transaction
-	for (auto &dropped_idx : changes.dropped_views) {
-		ConflictCheck(dropped_idx, other_changes.dropped_views, "drop view", "dropped it already");
-	}
-	// check if we are dropping the same macro as another transaction
-	for (auto &dropped_idx : changes.dropped_scalar_macros) {
-		ConflictCheck(dropped_idx, other_changes.dropped_scalar_macros, "drop macro", "dropped it already");
-	}
-	for (auto &dropped_idx : changes.dropped_table_macros) {
-		ConflictCheck(dropped_idx, other_changes.dropped_table_macros, "drop macro", "dropped it already");
-	}
-	// check if we are dropping the same schema as another transaction
+
+	// OCC-only: drop schema vs create entry in that schema (richer than name-only DetectConflicts).
 	for (auto &entry : changes.dropped_schemas) {
 		auto &dropped_schema = entry.second.get();
-		auto dropped_idx = entry.first;
-		ConflictCheck(dropped_idx, other_changes.dropped_schemas, "drop schema", "dropped it already");
-
 		ConflictCheck(dropped_schema.name.GetIdentifierName(), other_changes.created_tables, "drop schema",
 		              "created an entry in this schema");
 	}
-	// check if we are creating the same schema as another transaction
-	for (auto &created_schema : changes.created_schemas) {
-		ConflictCheck(created_schema, other_changes.created_schemas, "create schema",
-		              "created a schema with this name already");
-	}
-	// check if we are creating the same macro as another transaction
+	// OCC-only: create entry in a schema another txn dropped (by schema id).
 	ConflictCheck(changes.created_table_macros, other_changes.dropped_schemas, other_changes.created_table_macros);
 	ConflictCheck(changes.created_scalar_macros, other_changes.dropped_schemas, other_changes.created_scalar_macros);
 	ConflictCheck(changes.created_tables, other_changes.dropped_schemas, other_changes.created_tables);
-	// check if we are creating the same table as another transaction
+	// OCC-only: richer create-table messages (type-aware).
 	for (auto &entry : changes.created_tables) {
 		auto &schema_name = entry.first;
 		auto &created_tables = entry.second;
@@ -194,7 +178,6 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 				auto &other_created_tables = tbl_entry->second;
 				auto sub_entry = other_created_tables.find(table.name.GetIdentifierName());
 				if (sub_entry != other_created_tables.end()) {
-					// a table with this name in this schema was already created
 					throw TransactionException("Transaction conflict - attempting to create %s \"%s\" in schema \"%s\" "
 					                           "- but this %s has been created by another transaction already",
 					                           entry_type, table.name.GetIdentifierName(), schema_name,
@@ -203,28 +186,20 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 			}
 		}
 	}
+	// OCC-only: insert vs inlined-delete (not in DetectConflicts shared taxonomy yet).
 	for (auto &table_id : changes.tables_inserted_into) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "insert into table", "dropped it");
-		ConflictCheck(table_id, other_changes.altered_tables, "insert into table", "altered it");
-		ConflictCheck(table_id, other_changes.tables_deleted_from, "insert into table", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "insert into table",
 		              "deleted inlined data from it");
 	}
 	for (auto &table_id : changes.tables_inserted_inlined) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "insert into table", "dropped it");
-		ConflictCheck(table_id, other_changes.altered_tables, "insert into table", "altered it");
 		ConflictCheck(table_id, other_changes.tables_deleted_from, "insert into table", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "insert into table",
 		              "deleted inlined data from it");
 	}
 	for (auto &table_id : changes.tables_deleted_from) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "delete from table", "dropped it");
-		ConflictCheck(table_id, other_changes.altered_tables, "delete from table", "altered it");
-		ConflictCheck(table_id, other_changes.tables_merge_adjacent, "delete from table", "compacted it");
-		ConflictCheck(table_id, other_changes.tables_rewrite_delete, "delete from table", "compacted it");
-		ConflictCheck(table_id, other_changes.inserted_tables, "delete from table", "inserted into it");
 		ConflictCheck(table_id, other_changes.tables_inserted_inlined, "delete from table", "inserted into it");
 	}
+	// OCC-only: file-level delete conflicts.
 	if (!changes.tables_deleted_from.empty()) {
 		bool check_for_matches = false;
 		for (auto &table_id : changes.tables_deleted_from) {
@@ -234,7 +209,6 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 			}
 		}
 		if (check_for_matches) {
-			// If we have deletes on the tables, check for files being deleted
 			const auto deleted_files = GetFilesDeletedOrDroppedAfterSnapshot(executor);
 			for (auto &entry : local_changes.Changes()) {
 				auto &table_changes = entry.GetTableChanges();
@@ -250,38 +224,14 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
 			}
 		}
 	}
+	// OCC-only: flush / inlined asymmetries not fully mirrored in DetectConflicts.
 	for (auto &table_id : changes.tables_deleted_inlined) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "delete from table", "dropped it");
-		ConflictCheck(table_id, other_changes.altered_tables, "delete from table", "altered it");
-		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "delete from table", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_flushed_inlined, "delete from table", "flushed the inlined data");
-		ConflictCheck(table_id, other_changes.inserted_tables, "delete from table", "inserted into it");
-		ConflictCheck(table_id, other_changes.tables_inserted_inlined, "delete from table", "inserted into it");
 	}
 	for (auto &table_id : changes.tables_flushed_inlined) {
 		ConflictCheck(table_id, other_changes.dropped_tables, "flush inline data", "dropped it");
 		ConflictCheck(table_id, other_changes.tables_deleted_inlined, "flush inline data", "deleted from it");
 		ConflictCheck(table_id, other_changes.tables_flushed_inlined, "flush inline data", "flushed it");
-	}
-	for (auto &table_id : changes.tables_merge_adjacent) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "compact table", "dropped it");
-		ConflictCheck(table_id, other_changes.tables_deleted_from, "compact table", "deleted from it");
-		ConflictCheck(table_id, other_changes.tables_merge_adjacent, "compact table", "compacted it");
-		ConflictCheck(table_id, other_changes.tables_rewrite_delete, "compact table", "compacted it");
-	}
-	for (auto &table_id : changes.tables_rewrite_delete) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "compact table", "dropped it");
-		ConflictCheck(table_id, other_changes.tables_deleted_from, "compact table", "deleted from it");
-		ConflictCheck(table_id, other_changes.tables_merge_adjacent, "compact table", "compacted it");
-		ConflictCheck(table_id, other_changes.tables_rewrite_delete, "compact table", "compacted it");
-	}
-	for (auto &table_id : changes.altered_tables) {
-		ConflictCheck(table_id, other_changes.dropped_tables, "alter table", "dropped it");
-		ConflictCheck(table_id, other_changes.altered_tables, "alter table", "altered it");
-	}
-	for (auto &view_id : changes.altered_views) {
-		ConflictCheck(view_id, other_changes.dropped_views, "alter view", "dropped it");
-		ConflictCheck(view_id, other_changes.altered_views, "alter view", "altered it");
 	}
 }
 
