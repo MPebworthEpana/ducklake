@@ -288,6 +288,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	DuckLakeSnapshot snapshot(
 	    catalog.GetBeginSnapshotForSchemaVersion(table_id, inlined_table.schema_version, transaction),
 	    inlined_table.schema_version, 0, 0);
+	snapshot.branch_id = transaction.GetSnapshot().branch_id;
 
 	auto entry = catalog.GetEntryById(transaction, snapshot, table_id);
 	if (!entry) {

@@ -145,7 +145,8 @@ void DuckLakeTransactionState::CheckForConflicts(const TransactionChangeInformat
                                                  const std::function<unique_ptr<QueryResult>(string)> &executor) const {
 	// H2 G3: shared taxonomy via DetectConflicts, then OCC-only enrichments below.
 	auto local_as_snapshot = FromTransactionChanges(changes);
-	auto shared_conflicts = DetectConflicts(local_as_snapshot, other_changes);
+	auto shared_conflicts =
+	    DetectConflicts(local_as_snapshot, other_changes, ConflictReportStyle::TRANSACTION);
 	if (!shared_conflicts.empty()) {
 		throw TransactionException("Transaction conflict - %s", StringUtil::Join(shared_conflicts, "; "));
 	}

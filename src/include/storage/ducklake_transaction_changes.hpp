@@ -72,12 +72,22 @@ void MergeSnapshotChangeInformation(SnapshotChangeInformation &target, const Sna
 //! Adapt transaction-local change info into the snapshot shape used by DetectConflicts (G3).
 SnapshotChangeInformation FromTransactionChanges(const TransactionChangeInformation &changes);
 
+//! Message wording for DetectConflicts (shared taxonomy, different user-facing strings).
+enum class ConflictReportStyle {
+	//! "Merge conflict - both branches ..."
+	MERGE,
+	//! "attempting to ... - but another transaction has ..." (OCC / concurrent commits)
+	TRANSACTION
+};
+
 //! Symmetric conflict detection for three-way merge (and reusable by OCC callers).
 //! Returns human-readable conflict messages; empty means no conflicts.
 //! Same-table appends on both sides are NOT conflicts (compose).
 //! Overlapping same-table deletes are NOT reported here — callers that care about
 //! delete-vs-delete must apply file-level intersection (merge) or OCC enrichment.
+//! For TRANSACTION style, only source→target directions are reported (local vs other txn).
 vector<string> DetectConflicts(const SnapshotChangeInformation &source_changes,
-                               const SnapshotChangeInformation &target_changes);
+                               const SnapshotChangeInformation &target_changes,
+                               ConflictReportStyle style = ConflictReportStyle::MERGE);
 
 } // namespace duckdb

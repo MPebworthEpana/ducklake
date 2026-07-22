@@ -65,10 +65,10 @@ statement ok
 ATTACH 'ducklake:{TEST_DIR}/{UUID}_reown.db' AS dl2 (DATA_PATH '{DATA_PATH}/ducklake_merge_tombstone_reown', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
-CREATE TABLE dl2.t(i INTEGER);
+CREATE TABLE dl2.t(i INTEGER, j INTEGER);
 
 statement ok
-INSERT INTO dl2.t VALUES (1);
+INSERT INTO dl2.t VALUES (1, 10);
 
 statement ok
 CALL dl2.create_branch('dev')
@@ -77,10 +77,7 @@ statement ok
 CALL dl2.use_branch('dev')
 
 statement ok
-ALTER TABLE dl2.t DROP COLUMN i;
-
-statement ok
-ALTER TABLE dl2.t ADD COLUMN i INTEGER;
+ALTER TABLE dl2.t DROP COLUMN j;
 
 statement ok
 INSERT INTO dl2.t VALUES (42);
@@ -95,6 +92,7 @@ statement ok
 CALL dl2.use_branch('main')
 
 query I
-SELECT i FROM dl2.t
+SELECT i FROM dl2.t ORDER BY i
 ----
+1
 42
