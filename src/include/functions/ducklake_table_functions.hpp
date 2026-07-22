@@ -151,6 +151,16 @@ public:
 	DuckLakeCherryPickFunction();
 };
 
+class DuckLakeTransplantFunction : public TableFunction {
+public:
+	DuckLakeTransplantFunction();
+};
+
+class DuckLakeDiffFunction : public TableFunction {
+public:
+	DuckLakeDiffFunction();
+};
+
 class DuckLakeConvertInliningLayoutFunction : public TableFunction {
 public:
 	DuckLakeConvertInliningLayoutFunction();

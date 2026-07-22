@@ -15,6 +15,8 @@ add_library(
   ducklake_refs.cpp
   ducklake_merge_branch.cpp
   ducklake_cherry_pick.cpp
+  ducklake_transplant.cpp
+  ducklake_diff.cpp
   ducklake_convert_inlining_layout.cpp
   ducklake_set_option.cpp
   ducklake_snapshots.cpp

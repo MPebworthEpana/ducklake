@@ -610,6 +610,31 @@ struct DuckLakeCherryPickResult {
 	vector<string> messages;
 };
 
+struct DuckLakeTransplantResult {
+	string transplant_type; // "transplant" or "conflicts"
+	string source_branch;
+	string target_branch;
+	idx_t start_snapshot = 0;
+	idx_t end_snapshot = 0;
+	idx_t snapshots_applied = 0;
+	idx_t ancestor_snapshot = 0;
+	idx_t source_head = 0;
+	idx_t target_head = 0;
+	idx_t new_target_head = 0;
+	idx_t source_branch_id = 0;
+	idx_t target_branch_id = 0;
+	bool dry_run = false;
+	vector<string> messages;
+};
+
+struct DuckLakeDiffResult {
+	string object_type;
+	string schema_name;
+	string object_name;
+	string change;
+	string detail;
+};
+
 struct DuckLakeConvertInliningLayoutResult {
 	string source_layout;
 	string target_layout;

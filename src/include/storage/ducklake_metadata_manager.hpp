@@ -448,6 +448,11 @@ public:
 	//! Phase 5: apply exactly one source branch snapshot as a new target branch snapshot.
 	virtual DuckLakeCherryPickResult CherryPick(const string &source_branch, idx_t snapshot_id,
 	                                            const string &target_branch, bool dry_run);
+	//! Phase 5: apply a source-owned snapshot range onto a target branch after one combined validation.
+	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot,
+	                                            idx_t end_snapshot, const string &target_branch, bool dry_run);
+	//! Phase 5: catalog-level diff between two refs.
+	virtual vector<DuckLakeDiffResult> DiffRefs(const string &ref_a, const string &ref_b);
 	virtual DuckLakeConvertInliningLayoutResult ConvertInliningLayout(const string &target_layout, bool dry_run);
 	//! Snapshots visible on a branch (own + lineage-capped ancestors).
 	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());

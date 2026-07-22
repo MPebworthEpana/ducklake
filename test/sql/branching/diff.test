@@ -1,0 +1,74 @@
+# name: test/sql/branching/diff.test
+# description: Phase 5 T3 — catalog-level ducklake_diff
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_diff')
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.base VALUES (1);
+
+statement ok
+CREATE VIEW ducklake.main_view AS SELECT i FROM ducklake.base;
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+CREATE SCHEMA ducklake.s;
+
+statement ok
+CREATE TABLE ducklake.s.only_dev(x INTEGER);
+
+statement ok
+ALTER TABLE ducklake.base ADD COLUMN j VARCHAR;
+
+statement ok
+CREATE VIEW ducklake.dev_view AS SELECT i, j FROM ducklake.base;
+
+query I
+SELECT count(*) FROM ducklake.diff('dev', 'dev')
+----
+0
+
+query IIII
+SELECT object_type, schema_name, object_name, change
+FROM ducklake.diff('main', 'dev')
+WHERE object_type IN ('schema', 'table', 'view')
+ORDER BY object_type, schema_name, object_name, change
+----
+schema	s	s	added
+table	main	base	altered
+table	s	only_dev	added
+view	main	dev_view	added
+
+query IIII
+SELECT object_type, schema_name, object_name, change
+FROM ducklake.diff('dev', 'main')
+WHERE (object_type = 'schema' AND object_name = 's')
+   OR (object_type = 'table' AND object_name = 'only_dev')
+ORDER BY object_type, schema_name, object_name, change
+----
+schema	s	s	dropped
+table	s	only_dev	dropped
+
+query I
+SELECT detail LIKE '%columns changed%'
+FROM ducklake.diff('main', 'dev')
+WHERE object_type = 'table' AND schema_name = 'main' AND object_name = 'base' AND change = 'altered'
+----
+true
