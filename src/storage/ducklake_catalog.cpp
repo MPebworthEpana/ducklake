@@ -353,13 +353,17 @@ idx_t DuckLakeCatalog::GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx
 shared_ptr<DuckLakeSchemaCacheEntry> DuckLakeCatalog::GetSchemaCacheEntry(DuckLakeTransaction &transaction,
                                                                           DuckLakeSnapshot snapshot) {
 	auto &cache = GetObjectCacheInstance();
-	auto key = SchemaCacheKey(snapshot.schema_version);
+	auto key = SchemaCacheKey(snapshot.schema_version, snapshot.branch_id);
 	auto cached = cache.Get<DuckLakeSchemaCacheEntry>(key);
 	if (cached) {
 		return cached;
 	}
 	auto schema = LoadSchemaForSnapshot(transaction, snapshot);
 	auto entry = make_shared_ptr<DuckLakeSchemaCacheEntry>(std::move(schema));
+	{
+		lock_guard<mutex> guard(schema_cache_branches_lock);
+		schema_cache_branch_ids.insert(snapshot.branch_id);
+	}
 	cache.Put(std::move(key), entry);
 	return entry;
 }
@@ -1091,8 +1095,9 @@ string DuckLakeCatalog::StatsCacheKey(idx_t next_file_id, TableIndex table_id, i
 	                          instance_id, next_file_id, table_id.index, branch_id);
 }
 
-string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version) const {
-	return StringUtil::Format("ducklake:%s:%s:%s:schema:%llu", GetName(), MetadataPath(), instance_id, schema_version);
+string DuckLakeCatalog::SchemaCacheKey(idx_t schema_version, idx_t branch_id) const {
+	return StringUtil::Format("ducklake:%s:%s:%s:schema:%llu:branch:%llu", GetName(), MetadataPath(), instance_id,
+	                          schema_version, branch_id);
 }
 
 void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id, idx_t branch_id) {
@@ -1100,7 +1105,11 @@ void DuckLakeCatalog::InvalidateTableStatsCache(idx_t next_file_id, TableIndex t
 }
 
 void DuckLakeCatalog::InvalidateSchemaCache(idx_t schema_version) {
-	GetObjectCacheInstance().Delete(SchemaCacheKey(schema_version));
+	auto &cache = GetObjectCacheInstance();
+	lock_guard<mutex> guard(schema_cache_branches_lock);
+	for (auto branch_id : schema_cache_branch_ids) {
+		cache.Delete(SchemaCacheKey(schema_version, branch_id));
+	}
 }
 
 void DuckLakeCatalog::InvalidateNameMapCache(MappingIndex mapping_id) {

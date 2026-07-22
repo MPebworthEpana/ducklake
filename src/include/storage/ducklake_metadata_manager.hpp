@@ -215,6 +215,8 @@ public:
 	//! Lineage + tombstone visibility for a versioned metadata row owned by `alias.branch_id`.
 	static string LineageIntervalVisibility(const string &alias, const string &object_id_column,
 	                                        const string &deletion_table);
+	//! Column variant: object_id packs (table_id << 32) | column_id because column_id is per-table.
+	static string ColumnLineageIntervalVisibility(const string &alias);
 	//! Pure SQL templates (use `{METADATA_CATALOG}` placeholder) — caller substitutes + executes.
 	//! Both used by the regular metadata-manager methods and by server-side commit, which runs the
 	//! SQL on a fresh Connection without going through the metadata-manager wrapper.
@@ -251,6 +253,8 @@ public:
 	                                                                  DuckLakeFileSizeOptions options);
 	virtual idx_t GetBeginSnapshotForTable(TableIndex table_id);
 	virtual idx_t GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx_t schema_version);
+	//! Cap snapshot_id by lineage max_visible for the branch that owns `inlined_table_name`.
+	idx_t GetEffectiveInlinedReadSnapshot(DuckLakeSnapshot snapshot, const string &inlined_table_name);
 	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
 	virtual idx_t GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot);
 	//! SQL builders for stats-refresh metadata lookups; caller substitutes placeholders + executes.
