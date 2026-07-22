@@ -595,4 +595,11 @@ struct DuckLakeMergeBranchResult {
 	vector<string> messages;
 };
 
+struct DuckLakeConvertInliningLayoutResult {
+	string source_layout;
+	string target_layout;
+	bool dry_run = false;
+	vector<string> messages;
+};
+
 } // namespace duckdb

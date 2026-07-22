@@ -1,0 +1,114 @@
+# name: test/sql/branching/inlining_layout_convert.test
+# description: H3 G4 — convert inlined-data physical layout in both directions
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_inline_convert')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (100);
+
+query I
+SELECT COUNT(DISTINCT table_name) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+----
+1
+
+query IIII
+SELECT source_layout, target_layout, dry_run, COUNT(*)
+FROM ducklake.convert_inlining_layout('per_branch_table', dry_run := true)
+GROUP BY ALL
+----
+shared_table	per_branch_table	true	4
+
+statement error
+CALL ducklake.set_option('inlining_layout', 'per_branch_table')
+----
+Cannot change inlining_layout
+
+query IIII
+SELECT source_layout, target_layout, dry_run, COUNT(*)
+FROM ducklake.convert_inlining_layout('per_branch_table')
+GROUP BY ALL
+----
+shared_table	per_branch_table	false	4
+
+query II
+SELECT COUNT(DISTINCT table_name), COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+----
+2	2
+
+query I
+SELECT COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+WHERE table_name LIKE '%\_b%' ESCAPE '\'
+----
+1
+
+query I
+SELECT COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1_b1
+----
+1
+
+query I
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+100
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+
+query IIII
+SELECT source_layout, target_layout, dry_run, COUNT(*)
+FROM ducklake.convert_inlining_layout('shared_table')
+GROUP BY ALL
+----
+per_branch_table	shared_table	false	4
+
+query II
+SELECT COUNT(DISTINCT table_name), COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+----
+1	2
+
+query I
+SELECT COUNT(DISTINCT branch_id) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1
+----
+2
+
+query I
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+query I
+SELECT * FROM ducklake.t ORDER BY i
+----
+1
+100

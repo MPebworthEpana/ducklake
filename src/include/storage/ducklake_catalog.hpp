@@ -203,6 +203,7 @@ public:
 		auto require = GetConfigOption<string>("require_commit_message", {}, {}, "false");
 		return require == "true";
 	}
+	string GetInliningLayout() const;
 
 	void EnsureCommitInfoProvided(const DuckLakeSnapshotCommit &commit_info) const;
 

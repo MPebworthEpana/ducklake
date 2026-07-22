@@ -3,6 +3,7 @@
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/type_visitor.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_insert.hpp"
 #include "storage/ducklake_table_entry.hpp"
 #include "storage/ducklake_transaction.hpp"
@@ -401,11 +402,17 @@ OperatorFinalResultType DuckLakeInlineData::OperatorFinalize(Pipeline &pipeline,
 
 	// push the inlined data into the transaction
 	auto &transaction = DuckLakeTransaction::Get(context, table.ParentCatalog());
-	// Ancestor inlined tables (visible via lineage) do not count — this branch needs its own physical table.
+	auto &ducklake_catalog = table.ParentCatalog().Cast<DuckLakeCatalog>();
+	const bool shared_layout = ducklake_catalog.GetInliningLayout() == "shared_table";
 	const auto branch_id = transaction.GetSnapshot().branch_id;
 	const auto branch_suffix = branch_id == 0 ? string() : StringUtil::Format("_b%llu", branch_id);
 	bool has_branch_local_inlined_table = false;
 	for (auto &inlined_table : table.GetInlinedDataTables()) {
+		if (shared_layout) {
+			has_branch_local_inlined_table = true;
+			break;
+		}
+		// Ancestor inlined tables (visible via lineage) do not count in per-branch layout.
 		if (branch_id == 0) {
 			// Main owns names without a _b<id> suffix.
 			if (inlined_table.table_name.find("_b") == string::npos) {

@@ -146,6 +146,11 @@ public:
 	DuckLakeMergeBranchFunction();
 };
 
+class DuckLakeConvertInliningLayoutFunction : public TableFunction {
+public:
+	DuckLakeConvertInliningLayoutFunction();
+};
+
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {
 public:
 	DuckLakeOptionsFunction();

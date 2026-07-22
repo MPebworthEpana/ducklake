@@ -109,6 +109,8 @@ struct DuckLakeCommitContext {
 	bool supports_v1_1_metadata = false;
 	//! Whether writable divergent branches are available (>= 1.1-dev3).
 	bool supports_writable_branches = false;
+	//! Whether inlined data uses one physical table per table/schema_version across branches.
+	bool shared_inlining_layout = true;
 	//! Active branch for this commit (0 = main).
 	idx_t branch_id = 0;
 	//! Optional: evaluate user-declared commit preconditions (Phase 0). Throws on violation.

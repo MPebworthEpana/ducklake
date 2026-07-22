@@ -724,8 +724,10 @@ bool DuckLakeTransactionState::TryMergeInlinedStats(const vector<DuckLakeColumnS
 			select_list += StringUtil::Format(", MIN(%s)::VARCHAR, MAX(%s)::VARCHAR, COUNT(%s), %s", col_ident,
 			                                  col_ident, col_ident, nan_expr);
 		}
-		auto sql = DuckLakeMetadataManager::ReadInlinedDataAggregatesSql(
-		    DuckLakeUtil::SQLIdentifierToString(inlined_table_name), select_list);
+		auto sql =
+		    DuckLakeMetadataManager::ReadInlinedDataAggregatesSql(inlined_table_name, select_list,
+		                                                          context.shared_inlining_layout &&
+		                                                              context.supports_writable_branches);
 		auto result = context.query_metadata_with_snapshot(snapshot, sql);
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to read inlined-data aggregates from DuckLake: ");
@@ -1625,7 +1627,8 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 
 	// in case of a retry, we generate the deletion of inlined data from the tables
 	if (!flushed_inlined_tables.empty()) {
-		batch_queries += DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(flushed_inlined_tables);
+		batch_queries += DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(flushed_inlined_tables,
+		                                                                          context.shared_inlining_layout);
 	}
 
 	// drop data files
@@ -1661,7 +1664,8 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 
 		// write new inlined deletes (for inlined data tables)
 		auto inlined_deletes = GetNewInlinedDeletes(commit_state);
-		batch_queries += DuckLakeMetadataManager::WriteNewInlinedDeletes(inlined_deletes);
+		batch_queries += DuckLakeMetadataManager::WriteNewInlinedDeletes(inlined_deletes,
+		                                                                 context.shared_inlining_layout);
 
 		// write new inlined file deletes (for parquet files)
 		auto inlined_file_deletes = GetNewInlinedFileDeletes(commit_state);

@@ -1550,6 +1550,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.commit_info = state->commit_info;
 	context.supports_v1_1_metadata = ducklake_catalog.SupportsRowGroupCount();
 	context.supports_writable_branches = ducklake_catalog.SupportsWritableBranches();
+	context.shared_inlining_layout = ducklake_catalog.GetInliningLayout() == "shared_table";
 	context.branch_id = GetActiveBranchId();
 	if (HasCommitPreconditions()) {
 		context.check_commit_preconditions = [this]() {

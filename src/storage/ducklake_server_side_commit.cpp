@@ -135,6 +135,7 @@ void DuckLakeServerSideCommit::SetRetryConfigOverride(const DuckLakeRetryConfig 
 
 DuckLakeServerSideCommitResult DuckLakeServerSideCommit::Run() {
 	supports_writable_branches = ReadSupportsWritableBranches();
+	shared_inlining_layout = ReadInliningLayout() == "shared_table";
 	ReadCommitHeader();
 	ReadColumnTypes();
 	ReadStagedDeleteFiles();
@@ -660,6 +661,17 @@ bool DuckLakeServerSideCommit::ReadSupportsWritableBranches() {
 	return false;
 }
 
+string DuckLakeServerSideCommit::ReadInliningLayout() {
+	string sql = StringUtil::Replace("SELECT value FROM {METADATA_CATALOG}.ducklake_metadata WHERE key = "
+	                                 "'inlining_layout'",
+	                                 "{METADATA_CATALOG}", schema_id);
+	auto result = RunQuery(sql, "read inlining layout");
+	for (auto &row : *result) {
+		return row.GetValue<string>(0);
+	}
+	return "shared_table";
+}
+
 DuckLakeSnapshot DuckLakeServerSideCommit::ReadLatestSnapshot() {
 	string sql = StringUtil::Replace(DuckLakeMetadataManager::LatestSnapshotQuery(), "{METADATA_CATALOG}", schema_id);
 	auto result = RunQuery(sql, "read latest snapshot");
@@ -693,8 +705,9 @@ const string &DuckLakeServerSideCommit::ResolveInlinedTableName(TableIndex table
 	if (it != inlined_table_name_cache.end()) {
 		return it->second;
 	}
-	auto lookup = StringUtil::Replace(DuckLakeMetadataManager::LatestInlinedTableQuery(table_id.index),
-	                                  "{METADATA_CATALOG}", schema_id) +
+	auto lookup = SubstitutePlaceholders(
+	                  DuckLakeMetadataManager::LatestInlinedTableQuery(table_id.index, shared_inlining_layout),
+	                  transaction_snapshot) +
 	              ";";
 	auto result = RunQuery(lookup, "lookup inlined table name");
 	string name;
@@ -730,7 +743,7 @@ string DuckLakeServerSideCommit::BuildInlinedDataInserts(const vector<DuckLakeIn
 		}
 		batch += DuckLakeMetadataManager::FormatInlinedDataInsert(inlined_table_name, entry.row_id_start, has_preserved,
 		                                                          has_preserved ? &row_ids_it->second : nullptr,
-		                                                          cells_per_row);
+		                                                          cells_per_row, shared_inlining_layout);
 	}
 	return batch;
 }
@@ -742,6 +755,7 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 	ctx.skip_drop_empty_inlined = true;
 	ctx.supports_v1_1_metadata = ReadSupportsV1_1Metadata();
 	ctx.supports_writable_branches = supports_writable_branches;
+	ctx.shared_inlining_layout = shared_inlining_layout;
 	ctx.conflict_query_executor = [this](string q) -> unique_ptr<QueryResult> {
 		auto sql = SubstitutePlaceholders(std::move(q), transaction_snapshot);
 		return unique_ptr_cast<MaterializedQueryResult, QueryResult>(fresh_conn.Query(sql));
@@ -831,7 +845,8 @@ DuckLakeCommitContext DuckLakeServerSideCommit::BuildContext(idx_t &committed_sn
 		idx_t total = 0;
 		for (auto &name : LookupInlinedTableNames(table_id)) {
 			auto sql =
-			    SubstitutePlaceholders(DuckLakeMetadataManager::GetNetInlinedRowCountSql(name), transaction_snapshot);
+			    SubstitutePlaceholders(DuckLakeMetadataManager::GetNetInlinedRowCountSql(name, shared_inlining_layout),
+			                           transaction_snapshot);
 			auto result = RunQuery(sql, "read net inlined row count");
 			for (auto &row : *result) {
 				total += row.GetValue<idx_t>(0);

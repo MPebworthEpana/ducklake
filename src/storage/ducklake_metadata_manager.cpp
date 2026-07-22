@@ -595,6 +595,7 @@ void DuckLakeMetadataManager::DropRef(const string &ref_name, const string &ref_
 	if (!TryResolveRef(ref_name, ref_type, existing)) {
 		throw InvalidInputException("No %s named \"%s\" exists", ref_type, ref_name);
 	}
+	bool ref_deleted = false;
 	if (transaction.GetCatalog().SupportsWritableBranches() && ref_type == "branch") {
 		// Refuse drop while child branches still point at this branch
 		auto children = Query(StringUtil::Format(
@@ -630,19 +631,47 @@ WHERE parent_ref_id = %llu AND status = 'active' AND ref_type = 'branch')",
 			to_delete.push_back(std::move(info));
 		}
 
-		// Schedule live (end_snapshot IS NULL) data/delete files owned solely by this branch
-		auto schedule = Execute(StringUtil::Format(
-		    R"(
-INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
-SELECT data_file_id, path, path_is_relative, NOW()
+		auto delete_ref = Execute(StringUtil::Format(
+		    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
+		if (delete_ref->HasError()) {
+			delete_ref->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
+		}
+		ref_deleted = true;
+
+		auto file_candidates = Query(StringUtil::Format(R"(
+SELECT data_file_id AS schedule_file_id, data_file_id AS reachability_file_id, path, path_is_relative
 FROM {METADATA_CATALOG}.ducklake_data_file
 WHERE branch_id = %llu
-  AND data_file_id NOT IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion);
-INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion
-SELECT delete_file_id, path, path_is_relative, NOW()
+  AND data_file_id NOT IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion)
+UNION ALL
+SELECT delete_file_id AS schedule_file_id, data_file_id AS reachability_file_id, path, path_is_relative
 FROM {METADATA_CATALOG}.ducklake_delete_file
 WHERE branch_id = %llu
-  AND delete_file_id NOT IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion);
+  AND delete_file_id NOT IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion)
+)",
+		                                               existing.ref_id, existing.ref_id));
+		if (file_candidates->HasError()) {
+			file_candidates->GetErrorObject().Throw("Failed to list branch-owned files for cleanup: ");
+		}
+		string scheduled_values;
+		for (auto &row : *file_candidates) {
+			if (FileIsReachable(row.GetValue<idx_t>(1))) {
+				continue;
+			}
+			if (!scheduled_values.empty()) {
+				scheduled_values += ", ";
+			}
+			scheduled_values += StringUtil::Format("(%llu, %s, %s, NOW())", row.GetValue<idx_t>(0),
+			                                       SQLString(row.GetValue<string>(2)),
+			                                       row.GetValue<bool>(3) ? "true" : "false");
+		}
+
+		string schedule_sql;
+		if (!scheduled_values.empty()) {
+			schedule_sql +=
+			    "INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion VALUES " + scheduled_values + ";\n";
+		}
+		schedule_sql += StringUtil::Format(R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_file_column_stats
 WHERE data_file_id IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_data_file WHERE branch_id = %llu);
 DELETE FROM {METADATA_CATALOG}.ducklake_file_variant_stats
@@ -669,10 +698,11 @@ DELETE FROM {METADATA_CATALOG}.ducklake_deletion_delete_file WHERE branch_id = %
 DELETE FROM {METADATA_CATALOG}.ducklake_deletion_macro WHERE branch_id = %llu;
 DELETE FROM {METADATA_CATALOG}.ducklake_deletion_partition WHERE branch_id = %llu;
 )",
+		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
 		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
 		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
-		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
-		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id));
+		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id);
+		auto schedule = Execute(schedule_sql);
 		if (schedule->HasError()) {
 			schedule->GetErrorObject().Throw("Failed to reclaim DuckLake branch-owned files: ");
 		}
@@ -697,10 +727,12 @@ DELETE FROM {METADATA_CATALOG}.ducklake_snapshot WHERE snapshot_id IN (%s);
 			}
 		}
 	}
-	auto result = Execute(StringUtil::Format(
-	    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
-	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
+	if (!ref_deleted) {
+		auto result = Execute(StringUtil::Format(
+		    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
+		}
 	}
 	if (transaction.GetCatalog().SupportsWritableBranches() && ref_type == "branch") {
 		auto cleanup = Execute(StringUtil::Format(
@@ -1312,6 +1344,26 @@ WHERE snapshot_id = %llu;
 		}
 	}
 
+	if (transaction.GetCatalog().GetInliningLayout() == "shared_table") {
+		auto inlined_tables =
+		    Query("SELECT DISTINCT table_name FROM {METADATA_CATALOG}.ducklake_inlined_data_tables");
+		if (inlined_tables->HasError()) {
+			inlined_tables->GetErrorObject().Throw("Failed to list shared inlined-data tables during merge: ");
+		}
+		string reown_inlined_rows;
+		for (auto &row : *inlined_tables) {
+			reown_inlined_rows += StringUtil::Format(
+			    "UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n",
+			    SQLIdentifier(row.GetValue<string>(0)), target_ref.ref_id, source_ref.ref_id);
+		}
+		if (!reown_inlined_rows.empty()) {
+			auto inlined_reown = Execute(reown_inlined_rows);
+			if (inlined_reown->HasError()) {
+				inlined_reown->GetErrorObject().Throw("Failed to re-own shared inlined-data rows during merge: ");
+			}
+		}
+	}
+
 	// Re-own non-tombstone metadata, then apply tombstone policy at the merge snapshot.
 	auto reown = Execute(BuildReownNonTombstoneSQL(source_ref.ref_id, target_ref.ref_id));
 	if (reown->HasError()) {
@@ -1349,6 +1401,224 @@ UPDATE {METADATA_CATALOG}.ducklake_ref SET snapshot_id = %llu WHERE ref_id = %ll
 	result.messages.push_back(StringUtil::Format("New target head: %llu", new_head));
 	result.target_branch_id = target_ref.ref_id;
 	result.source_branch_id = source_ref.ref_id;
+	return result;
+}
+
+namespace {
+
+struct InlinedLayoutRegistration {
+	idx_t table_id;
+	string table_name;
+	idx_t schema_version;
+	idx_t branch_id;
+};
+
+static string NormalizeInliningLayout(const string &layout) {
+	auto normalized = StringUtil::Lower(layout);
+	if (normalized != "shared_table" && normalized != "per_branch_table") {
+		throw InvalidInputException("inlining_layout must be 'shared_table' or 'per_branch_table', got \"%s\"", layout);
+	}
+	return normalized;
+}
+
+static string ConversionTempTableName(idx_t table_id, idx_t schema_version) {
+	return StringUtil::Format("__ducklake_convert_inlined_%llu_%llu", table_id, schema_version);
+}
+
+} // namespace
+
+DuckLakeConvertInliningLayoutResult DuckLakeMetadataManager::ConvertInliningLayout(const string &target_layout_p,
+                                                                                   bool dry_run) {
+	if (!transaction.GetCatalog().SupportsWritableBranches()) {
+		throw InvalidInputException(
+		    "ducklake_convert_inlining_layout requires DuckLake catalog version >= 1.1-dev3. "
+		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+	}
+	auto target_layout = NormalizeInliningLayout(target_layout_p);
+	auto source_layout = transaction.GetCatalog().GetInliningLayout();
+	DuckLakeConvertInliningLayoutResult result;
+	result.source_layout = source_layout;
+	result.target_layout = target_layout;
+	result.dry_run = dry_run;
+	if (source_layout == target_layout) {
+		result.messages.push_back(StringUtil::Format("inlining_layout is already %s", target_layout));
+		return result;
+	}
+
+	auto registrations_result = Query(R"(
+SELECT table_id, table_name, schema_version, branch_id
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+ORDER BY table_id, schema_version, branch_id, table_name
+)");
+	if (registrations_result->HasError()) {
+		registrations_result->GetErrorObject().Throw("Failed to read inlined-data registrations in DuckLake: ");
+	}
+	vector<InlinedLayoutRegistration> registrations;
+	for (auto &row : *registrations_result) {
+		registrations.push_back({row.GetValue<idx_t>(0), row.GetValue<string>(1), row.GetValue<idx_t>(2),
+		                         row.GetValue<idx_t>(3)});
+	}
+
+	string sql;
+	set<string> copied_targets;
+	set<string> dropped_sources;
+
+	if (source_layout == "shared_table" && target_layout == "per_branch_table") {
+		map<string, string> shared_main_temps;
+		for (auto &reg : registrations) {
+			set<idx_t> branch_ids;
+			branch_ids.insert(reg.branch_id);
+			auto branch_result =
+			    Query(StringUtil::Format("SELECT DISTINCT branch_id FROM {METADATA_CATALOG}.%s",
+			                             SQLIdentifier(reg.table_name)));
+			if (branch_result->HasError()) {
+				branch_result->GetErrorObject().Throw("Failed to read shared inlined-data table branches: ");
+			}
+			for (auto &row : *branch_result) {
+				branch_ids.insert(row.GetValue<idx_t>(0));
+			}
+			for (auto branch_id : branch_ids) {
+				auto target_name = InlinedTableNameFor(reg.table_id, reg.schema_version, branch_id, false);
+				auto physical_target_name = target_name;
+				if (branch_id == 0 && target_name == reg.table_name) {
+					physical_target_name = ConversionTempTableName(reg.table_id, reg.schema_version);
+					shared_main_temps[reg.table_name] = physical_target_name;
+				}
+				auto target_key = StringUtil::Format("%llu:%llu:%llu", reg.table_id, reg.schema_version, branch_id);
+				if (copied_targets.insert(target_key).second) {
+					auto count_result = Query(StringUtil::Format(
+					    "SELECT COUNT(*) FROM {METADATA_CATALOG}.%s WHERE branch_id = %llu",
+					    SQLIdentifier(reg.table_name), branch_id));
+					if (count_result->HasError()) {
+						count_result->GetErrorObject().Throw("Failed to count shared inlined-data rows: ");
+					}
+					auto row_count = count_result->Fetch()->GetValue(0, 0).GetValue<idx_t>();
+					result.messages.push_back(StringUtil::Format("copy %llu rows from %s(branch %llu) to %s", row_count,
+					                                             reg.table_name, branch_id, target_name));
+					sql += StringUtil::Format(R"(
+CREATE OR REPLACE TABLE {METADATA_CATALOG}.%s AS
+SELECT row_id, begin_snapshot, end_snapshot, * EXCLUDE(row_id, begin_snapshot, end_snapshot, branch_id)
+FROM {METADATA_CATALOG}.%s
+WHERE branch_id = %llu;
+)",
+					                          SQLIdentifier(physical_target_name), SQLIdentifier(reg.table_name),
+					                          branch_id);
+				}
+				sql += StringUtil::Format(R"(
+UPDATE {METADATA_CATALOG}.ducklake_inlined_data_tables
+SET table_name = %s
+WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu;
+INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, schema_version, branch_id)
+SELECT %llu, %s, %llu, %llu
+WHERE NOT EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+  WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu
+);
+)",
+				                          SQLString(target_name), reg.table_id, reg.schema_version, branch_id,
+				                          reg.table_id, SQLString(target_name), reg.schema_version, branch_id,
+				                          reg.table_id, reg.schema_version, branch_id);
+			}
+			if (dropped_sources.insert(reg.table_name).second) {
+				result.messages.push_back(StringUtil::Format("drop shared physical table %s", reg.table_name));
+				sql += StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;\n",
+				                          SQLIdentifier(reg.table_name));
+				auto temp_entry = shared_main_temps.find(reg.table_name);
+				if (temp_entry != shared_main_temps.end()) {
+					sql += StringUtil::Format("ALTER TABLE {METADATA_CATALOG}.%s RENAME TO %s;\n",
+					                          SQLIdentifier(temp_entry->second), SQLIdentifier(reg.table_name));
+				}
+			}
+		}
+	} else if (source_layout == "per_branch_table" && target_layout == "shared_table") {
+		map<pair<idx_t, idx_t>, vector<InlinedLayoutRegistration>> by_table_version;
+		for (auto &reg : registrations) {
+			by_table_version[make_pair(reg.table_id, reg.schema_version)].push_back(reg);
+		}
+		for (auto &entry : by_table_version) {
+			auto table_id = entry.first.first;
+			auto schema_version = entry.first.second;
+			auto shared_name = InlinedTableNameFor(table_id, schema_version);
+			auto temp_name = ConversionTempTableName(table_id, schema_version);
+			auto &regs = entry.second;
+			if (regs.empty()) {
+				continue;
+			}
+			result.messages.push_back(StringUtil::Format("create shared physical table %s", shared_name));
+			sql += StringUtil::Format(R"(
+CREATE OR REPLACE TABLE {METADATA_CATALOG}.%s AS
+SELECT row_id, begin_snapshot, end_snapshot, CAST(%llu AS BIGINT) AS branch_id,
+       * EXCLUDE(row_id, begin_snapshot, end_snapshot)
+FROM {METADATA_CATALOG}.%s
+WHERE 1 = 0;
+)",
+			                          SQLIdentifier(temp_name), regs[0].branch_id, SQLIdentifier(regs[0].table_name));
+			for (auto &reg : regs) {
+				auto count_result =
+				    Query(StringUtil::Format("SELECT COUNT(*) FROM {METADATA_CATALOG}.%s",
+				                             SQLIdentifier(reg.table_name)));
+				if (count_result->HasError()) {
+					count_result->GetErrorObject().Throw("Failed to count per-branch inlined-data rows: ");
+				}
+				auto row_count = count_result->Fetch()->GetValue(0, 0).GetValue<idx_t>();
+				result.messages.push_back(StringUtil::Format("copy %llu rows from %s as branch %llu", row_count,
+				                                             reg.table_name, reg.branch_id));
+				sql += StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.%s
+SELECT row_id, begin_snapshot, end_snapshot, CAST(%llu AS BIGINT) AS branch_id,
+       * EXCLUDE(row_id, begin_snapshot, end_snapshot)
+FROM {METADATA_CATALOG}.%s;
+UPDATE {METADATA_CATALOG}.ducklake_inlined_data_tables
+SET table_name = %s
+WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu;
+)",
+				                          SQLIdentifier(temp_name), reg.branch_id, SQLIdentifier(reg.table_name),
+				                          SQLString(shared_name), reg.table_id, reg.schema_version, reg.branch_id);
+				if (dropped_sources.insert(reg.table_name).second) {
+					sql += StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;\n",
+					                          SQLIdentifier(reg.table_name));
+				}
+			}
+			sql += StringUtil::Format("ALTER TABLE {METADATA_CATALOG}.%s RENAME TO %s;\n", SQLIdentifier(temp_name),
+			                          SQLIdentifier(shared_name));
+		}
+	} else {
+		throw InternalException("Unsupported inlining_layout conversion from %s to %s", source_layout, target_layout);
+	}
+
+	result.messages.push_back(StringUtil::Format("%s set inlining_layout to %s",
+	                                             dry_run ? "would" : "will", target_layout));
+	if (dry_run) {
+		return result;
+	}
+	if (!sql.empty()) {
+		auto exec_result = Execute(sql);
+		if (exec_result->HasError()) {
+			exec_result->GetErrorObject().Throw("Failed to convert inlining layout in DuckLake: ");
+		}
+	}
+	DuckLakeConfigOption config_option;
+	config_option.option.key = "inlining_layout";
+	config_option.option.value = target_layout;
+	auto config_result = Execute(StringUtil::Format(R"(
+UPDATE {METADATA_CATALOG}.ducklake_metadata
+SET value = %s
+WHERE key = 'inlining_layout' AND scope IS NULL;
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata(key, value, scope, scope_id)
+SELECT 'inlining_layout', %s, NULL, NULL
+WHERE NOT EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_metadata WHERE key = 'inlining_layout' AND scope IS NULL
+);
+)",
+	                                             SQLString(target_layout), SQLString(target_layout)));
+	if (config_result->HasError()) {
+		config_result->GetErrorObject().Throw("Failed to update inlining_layout option in DuckLake: ");
+	}
+	transaction.GetCatalog().SetConfigOption(config_option);
+	for (auto &reg : registrations) {
+		transaction.GetCatalog().InvalidateSchemaCache(reg.schema_version);
+	}
+	ClearCache();
 	return result;
 }
 
@@ -1585,19 +1855,48 @@ idx_t DuckLakeMetadataManager::GetNetDataFileRowCount(TableIndex table_id, DuckL
 	return 0;
 }
 
-string DuckLakeMetadataManager::GetNetInlinedRowCountSql(const string &inlined_table_name) {
+static string SharedInlinedVisibilityPredicate(const string &alias) {
+	auto prefix = alias.empty() ? string() : alias + ".";
+	return StringUtil::Format(R"(EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage l
+  WHERE l.branch_id = {BRANCH_ID}
+    AND l.ancestor_branch_id = %sbranch_id
+    AND %sbegin_snapshot <= LEAST({SNAPSHOT_ID}, l.max_visible_snapshot)
+    AND (%send_snapshot IS NULL OR %send_snapshot > LEAST({SNAPSHOT_ID}, l.max_visible_snapshot))
+))",
+	                          prefix, prefix, prefix, prefix);
+}
+
+static string SharedInlinedEventPredicate(const string &alias, const string &snapshot_column,
+                                          const string &upper_snapshot_expr) {
+	auto prefix = alias.empty() ? string() : alias + ".";
+	return StringUtil::Format(R"(EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage l
+  WHERE l.branch_id = {BRANCH_ID}
+    AND l.ancestor_branch_id = %sbranch_id
+    AND %s%s <= LEAST(%s, l.max_visible_snapshot)
+))",
+	                          prefix, prefix, snapshot_column, upper_snapshot_expr);
+}
+
+string DuckLakeMetadataManager::GetNetInlinedRowCountSql(const string &inlined_table_name, bool shared_layout) {
+	auto filter = shared_layout ? " AND " + SharedInlinedVisibilityPredicate("inlined_data") : "";
 	return StringUtil::Format(R"(
 SELECT COUNT(*)
-FROM {METADATA_CATALOG}.%s
+FROM {METADATA_CATALOG}.%s inlined_data
 WHERE {SNAPSHOT_ID} >= begin_snapshot
-  AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL))",
-	                          inlined_table_name);
+  AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)%s)",
+	                          SQLIdentifier(inlined_table_name), filter);
 }
 
 idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot) {
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_snapshot = snapshot;
-	read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
-	auto result = Query(read_snapshot, GetNetInlinedRowCountSql(inlined_table_name));
+	if (!shared_layout) {
+		read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
+	}
+	auto result = Query(read_snapshot, GetNetInlinedRowCountSql(inlined_table_name, shared_layout));
 	for (auto &row : *result) {
 		return row.GetValue<idx_t>(0);
 	}
@@ -1693,9 +1992,12 @@ SELECT schema_id, tbl.table_id, table_uuid::VARCHAR, table_name,
 	) AS tag,
 	(
 		SELECT %s
-		FROM {METADATA_CATALOG}.ducklake_inlined_data_tables inlined_data_tables
-		WHERE inlined_data_tables.table_id = tbl.table_id
-		  {BRANCH_INLINED_TABLE_FILTER}
+		FROM (
+			SELECT DISTINCT table_name, schema_version
+			FROM {METADATA_CATALOG}.ducklake_inlined_data_tables inlined_data_tables
+			WHERE inlined_data_tables.table_id = tbl.table_id
+			  {BRANCH_INLINED_TABLE_FILTER}
+		) inlined_data_tables
 	) AS inlined_data_tables,
 	path, path_is_relative,
 	col.column_id, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column,
@@ -3870,18 +4172,21 @@ string DuckLakeMetadataManager::InlinedTableNameFor(idx_t table_id, idx_t schema
 	return StringUtil::Format("ducklake_inlined_data_%d_%d", table_id, schema_version);
 }
 
-string DuckLakeMetadataManager::InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id) {
-	if (branch_id == 0) {
+string DuckLakeMetadataManager::InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id,
+                                                   bool shared_layout) {
+	if (shared_layout || branch_id == 0) {
 		return InlinedTableNameFor(table_id, schema_version);
 	}
 	// H3 G4: per-branch physical tables keep non-main inlined rows isolated.
 	return StringUtil::Format("ducklake_inlined_data_%d_%d_b%d", table_id, schema_version, branch_id);
 }
 
-string DuckLakeMetadataManager::InlinedTableDdlSql(const string &table_name, const string &column_defs) {
+string DuckLakeMetadataManager::InlinedTableDdlSql(const string &table_name, const string &column_defs,
+                                                   bool shared_layout) {
+	auto branch_column = shared_layout ? "branch_id BIGINT, " : "";
 	return StringUtil::Format("CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s(row_id BIGINT, begin_snapshot BIGINT, "
-	                          "end_snapshot BIGINT, %s);",
-	                          SQLIdentifier(table_name), column_defs);
+	                          "end_snapshot BIGINT, %s%s);",
+	                          SQLIdentifier(table_name), branch_column, column_defs);
 }
 
 string DuckLakeMetadataManager::InlinedTableRegistrationTuple(idx_t table_id, const string &table_name,
@@ -3889,13 +4194,14 @@ string DuckLakeMetadataManager::InlinedTableRegistrationTuple(idx_t table_id, co
 	return StringUtil::Format("(%d, %s, %d{BRANCH_ID_VAL})", table_id, SQLString(table_name), schema_version);
 }
 
-string DuckLakeMetadataManager::LatestInlinedTableQuery(idx_t table_id) {
+string DuckLakeMetadataManager::LatestInlinedTableQuery(idx_t table_id, bool shared_layout) {
+	auto branch_filter = shared_layout ? "" : "{BRANCH_STATS_FILTER}";
 	return StringUtil::Format(
 	    "SELECT table_name, schema_version FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
-	    "WHERE table_id = %d{BRANCH_STATS_FILTER} AND schema_version = ("
+	    "WHERE table_id = %d%s AND schema_version = ("
 	    "  SELECT MAX(schema_version) FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
-	    "  WHERE table_id = %d{BRANCH_STATS_FILTER})",
-	    table_id, table_id);
+	    "  WHERE table_id = %d%s)",
+	    table_id, branch_filter, table_id, branch_filter);
 }
 
 string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &table, const string &table_name) {
@@ -3908,7 +4214,7 @@ string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &ta
 	}
 	// We created a table here, flag we need to clear our cache at commit
 	MarkPendingCacheClear();
-	return InlinedTableDdlSql(table_name, column_defs);
+	return InlinedTableDdlSql(table_name, column_defs, transaction.GetCatalog().GetInliningLayout() == "shared_table");
 }
 
 string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
@@ -3957,8 +4263,9 @@ string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &
 
 string DuckLakeMetadataManager::GetInlinedTableQueries(DuckLakeSnapshot commit_snapshot, const DuckLakeTableInfo &table,
                                                        string &inlined_tables, string &inlined_table_queries) {
+	const bool shared_layout = transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	string inlined_table_name =
-	    InlinedTableNameFor(table.id.index, commit_snapshot.schema_version, commit_snapshot.branch_id);
+	    InlinedTableNameFor(table.id.index, commit_snapshot.schema_version, commit_snapshot.branch_id, shared_layout);
 	if (!inlined_tables.empty()) {
 		inlined_tables += ", ";
 	}
@@ -4126,12 +4433,13 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 
 	auto context_ptr = transaction.context.lock();
 	auto &context = *context_ptr;
+	const bool shared_layout = transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	for (auto &entry : new_data) {
 		string inlined_table_name;
 		for (auto &inlined_table : new_inlined_data_tables_result) {
 			if (inlined_table.id == entry.table_id) {
 				inlined_table_name = InlinedTableNameFor(inlined_table.id.index, commit_snapshot.schema_version,
-				                                        commit_snapshot.branch_id);
+				                                        commit_snapshot.branch_id, shared_layout);
 			}
 		}
 		if (inlined_table_name.empty()) {
@@ -4142,7 +4450,7 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 			}
 		}
 		if (inlined_table_name.empty()) {
-			auto query = LatestInlinedTableQuery(entry.table_id.index) + ";";
+			auto query = LatestInlinedTableQuery(entry.table_id.index, shared_layout) + ";";
 			auto result = Query(commit_snapshot, query);
 			for (auto &row : *result) {
 				inlined_table_name = row.GetValue<string>(0);
@@ -4196,14 +4504,15 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 			}
 		}
 		batch_query += FormatInlinedDataInsert(inlined_table_name, entry.row_id_start, has_preserved_row_ids,
-		                                       has_preserved_row_ids ? &entry.data->row_ids : nullptr, cells_per_row);
+		                                       has_preserved_row_ids ? &entry.data->row_ids : nullptr, cells_per_row,
+		                                       shared_layout);
 	}
 	return batch_query;
 }
 
 string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_table_name, idx_t row_id_start,
                                                         bool has_preserved_row_ids, const vector<int64_t> *row_ids,
-                                                        const vector<string> &cells_per_row) {
+                                                        const vector<string> &cells_per_row, bool shared_layout) {
 	if (cells_per_row.empty()) {
 		return string();
 	}
@@ -4221,13 +4530,18 @@ string DuckLakeMetadataManager::FormatInlinedDataInsert(const string &inlined_ta
 		if (!values.empty()) {
 			values += ", ";
 		}
-		values += StringUtil::Format("(%lld, {SNAPSHOT_ID}, NULL, %s)", emit_rid, cells_per_row[i]);
+		if (shared_layout) {
+			values += StringUtil::Format("(%lld, {SNAPSHOT_ID}, NULL, {BRANCH_ID}, %s)", emit_rid, cells_per_row[i]);
+		} else {
+			values += StringUtil::Format("(%lld, {SNAPSHOT_ID}, NULL, %s)", emit_rid, cells_per_row[i]);
+		}
 	}
 	return StringUtil::Format("INSERT INTO {METADATA_CATALOG}.%s VALUES %s;", SQLIdentifier(inlined_table_name),
 	                          values);
 }
 
-string DuckLakeMetadataManager::WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes) {
+string DuckLakeMetadataManager::WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes,
+                                                       bool shared_layout) {
 	string batch_queries;
 	if (new_deletes.empty()) {
 		return batch_queries;
@@ -4249,9 +4563,10 @@ VALUES %s
 UPDATE {METADATA_CATALOG}.%s
 SET end_snapshot = {SNAPSHOT_ID}
 FROM deleted_row_list
-WHERE row_id=deleted_row_id AND end_snapshot IS NULL AND begin_snapshot != {SNAPSHOT_ID};
+WHERE row_id=deleted_row_id AND end_snapshot IS NULL AND begin_snapshot != {SNAPSHOT_ID}%s;
 )",
-		                                    row_id_list, entry.table_name);
+		                                    row_id_list, SQLIdentifier(entry.table_name),
+		                                    shared_layout ? " AND branch_id = {BRANCH_ID}" : "");
 	}
 	return batch_queries;
 }
@@ -4486,15 +4801,21 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedData(DuckLakeSnapsho
                                                                  const string &inlined_table_name,
                                                                  const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	// Cap at lineage max_visible so post-fork ancestor inserts stay hidden on child branches.
 	DuckLakeSnapshot read_snapshot = snapshot;
-	read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
+	if (!shared_layout) {
+		read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
+	}
+	auto shared_filter = shared_layout ? " AND " + SharedInlinedVisibilityPredicate("inlined_data") : "";
 	auto result = Query(read_snapshot, StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
 WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
+%s
 ORDER BY row_id;)",
-	                                                      projection, inlined_table_name));
+	                                                      projection, SQLIdentifier(inlined_table_name), shared_filter));
 	return result;
 }
 
@@ -4503,13 +4824,21 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedDataInsertions(DuckL
                                                                            const string &inlined_table_name,
                                                                            const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_end = end_snapshot;
-	read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
+	if (!shared_layout) {
+		read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
+	}
+	auto shared_filter =
+	    shared_layout ? " AND " + SharedInlinedEventPredicate("inlined_data", "begin_snapshot", "{SNAPSHOT_ID}") : "";
 	auto result = Query(read_end, StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
-WHERE inlined_data.begin_snapshot >= %d AND inlined_data.begin_snapshot <= {SNAPSHOT_ID};)",
-	                                                 projection, inlined_table_name, start_snapshot.snapshot_id));
+WHERE inlined_data.begin_snapshot >= %d AND inlined_data.begin_snapshot <= {SNAPSHOT_ID}
+%s;)",
+	                                                 projection, SQLIdentifier(inlined_table_name),
+	                                                 start_snapshot.snapshot_id, shared_filter));
 	return result;
 }
 
@@ -4518,13 +4847,21 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedDataDeletions(DuckLa
                                                                           const string &inlined_table_name,
                                                                           const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_end = end_snapshot;
-	read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
+	if (!shared_layout) {
+		read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
+	}
+	auto shared_filter =
+	    shared_layout ? " AND " + SharedInlinedEventPredicate("inlined_data", "end_snapshot", "{SNAPSHOT_ID}") : "";
 	auto result = Query(read_end, StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
-WHERE inlined_data.end_snapshot >= %d AND inlined_data.end_snapshot <= {SNAPSHOT_ID};)",
-	                                                 projection, inlined_table_name, start_snapshot.snapshot_id));
+WHERE inlined_data.end_snapshot >= %d AND inlined_data.end_snapshot <= {SNAPSHOT_ID}
+%s;)",
+	                                                 projection, SQLIdentifier(inlined_table_name),
+	                                                 start_snapshot.snapshot_id, shared_filter));
 	return result;
 }
 
@@ -4532,23 +4869,27 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadAllInlinedDataForFlush(Duck
                                                                             const string &inlined_table_name,
                                                                             const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	auto shared_filter = shared_layout ? " AND branch_id = {BRANCH_ID}" : "";
 	auto result = Query(snapshot, StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
-WHERE {SNAPSHOT_ID} >= begin_snapshot
+WHERE {SNAPSHOT_ID} >= begin_snapshot%s
 ORDER BY row_id, begin_snapshot;)",
-	                                                 projection, inlined_table_name));
+	                                                 projection, SQLIdentifier(inlined_table_name), shared_filter));
 	return result;
 }
 
 string DuckLakeMetadataManager::ReadInlinedDataAggregatesSql(const string &inlined_table_name,
-                                                             const string &select_list) {
+                                                             const string &select_list, bool shared_layout) {
+	auto shared_filter = shared_layout ? " AND " + SharedInlinedVisibilityPredicate("inlined_data") : "";
 	return StringUtil::Format(R"(
 SELECT %s
-FROM {METADATA_CATALOG}.%s
-WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL);
+FROM {METADATA_CATALOG}.%s inlined_data
+WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)%s;
 )",
-	                          select_list, inlined_table_name);
+	                          select_list, SQLIdentifier(inlined_table_name), shared_filter);
 }
 
 string DuckLakeMetadataManager::ReadFileColumnStatsForTableSql(TableIndex table_id) {
@@ -6584,6 +6925,9 @@ WHERE %s (end_snapshot IS NOT NULL AND NOT EXISTS(
 		path.path = row.GetValue<string>(2);
 		path.path_is_relative = row.GetValue<bool>(3);
 		info.path = FromRelativePath(table_id, path);
+		if (FileIsReachable(info.id.index)) {
+			continue;
+		}
 
 		cleanup_files.push_back(std::move(info));
 	}
@@ -6635,7 +6979,7 @@ VALUES %s;
 	}
 
 	result = Query(StringUtil::Format(R"(
-SELECT delete_file_id, table_id, path, path_is_relative
+SELECT delete_file_id, table_id, path, path_is_relative, data_file_id
 FROM {METADATA_CATALOG}.ducklake_delete_file
 WHERE %s %s (end_snapshot IS NOT NULL AND NOT EXISTS(
     SELECT snapshot_id
@@ -6653,6 +6997,9 @@ WHERE %s %s (end_snapshot IS NOT NULL AND NOT EXISTS(
 		path.path = row.GetValue<string>(2);
 		path.path_is_relative = row.GetValue<bool>(3);
 		info.path = FromRelativePath(table_id, path);
+		if (FileIsReachable(row.GetValue<idx_t>(4))) {
+			continue;
+		}
 
 		cleanup_deletes.push_back(std::move(info));
 	}
@@ -6869,10 +7216,13 @@ void DuckLakeMetadataManager::DeleteInlinedData(const DuckLakeInlinedTableInfo &
 
 void DuckLakeMetadataManager::DeleteFlushedInlinedData(const DuckLakeInlinedTableInfo &inlined_table,
                                                        idx_t flush_snapshot_id) {
+	const bool shared_layout =
+	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	auto result = Execute(StringUtil::Format(R"(
-		DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d
+		DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d%s
 )",
-	                                         SQLIdentifier(inlined_table.table_name), flush_snapshot_id));
+	                                         SQLIdentifier(inlined_table.table_name), flush_snapshot_id,
+	                                         shared_layout ? " AND branch_id = {BRANCH_ID}" : ""));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to delete flushed inlined data in DuckLake from table " +
 		                               inlined_table.table_name + ": ");
@@ -6880,11 +7230,13 @@ void DuckLakeMetadataManager::DeleteFlushedInlinedData(const DuckLakeInlinedTabl
 }
 
 string
-DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables) {
+DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables,
+                                                          bool shared_layout) {
 	string result;
 	for (auto &flushed : flushed_tables) {
-		result += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d;\n",
-		                             SQLIdentifier(flushed.inlined_table.table_name), flushed.flush_snapshot_id);
+		result += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d%s;\n",
+		                             SQLIdentifier(flushed.inlined_table.table_name), flushed.flush_snapshot_id,
+		                             shared_layout ? " AND branch_id = {BRANCH_ID}" : "");
 	}
 	return result;
 }
@@ -6949,6 +7301,45 @@ void DuckLakeMetadataManager::SetConfigOption(const DuckLakeConfigOption &option
 	// check if the option already exists
 	auto &option_key = option.option.key;
 	auto &option_value = option.option.value;
+	if (option_key == "inlining_layout" && option_value != transaction.GetCatalog().GetInliningLayout()) {
+		auto unsafe_layout = Query(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+WHERE branch_id != 0 OR table_name LIKE '%\_b%' ESCAPE '\'
+LIMIT 1
+)");
+		if (unsafe_layout->HasError()) {
+			unsafe_layout->GetErrorObject().Throw("Failed to validate inlining_layout change in DuckLake: ");
+		}
+		for (auto &row : *unsafe_layout) {
+			(void)row;
+			throw InvalidInputException(
+			    "Cannot change inlining_layout after non-main or per-branch inlined data tables have been created; "
+			    "use ducklake.convert_inlining_layout(..., dry_run := true) to inspect a conversion first");
+		}
+		auto tables_result = Query(R"(
+SELECT DISTINCT table_name
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+)");
+		if (tables_result->HasError()) {
+			tables_result->GetErrorObject().Throw("Failed to validate inlining_layout change in DuckLake: ");
+		}
+		for (auto &row : *tables_result) {
+			auto table_name = row.GetValue<string>(0);
+			auto rows_result = Query(StringUtil::Format(
+			    "SELECT 1 FROM {METADATA_CATALOG}.%s WHERE branch_id != 0 LIMIT 1", SQLIdentifier(table_name)));
+			if (rows_result->HasError()) {
+				continue;
+			}
+			for (auto &physical_row : *rows_result) {
+				(void)physical_row;
+				throw InvalidInputException(
+				    "Cannot change inlining_layout after non-main or per-branch inlined data tables have been "
+				    "created; use ducklake.convert_inlining_layout(..., dry_run := true) to inspect a conversion "
+				    "first");
+			}
+		}
+	}
 	string scope;
 	string scope_id;
 	string scope_filter;
