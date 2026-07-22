@@ -106,6 +106,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeRefsFunction refs;
 	loader.RegisterFunction(refs);
 
+	DuckLakeRefHistoryFunction ref_history;
+	loader.RegisterFunction(ref_history);
+
 	DuckLakeUseBranchFunction use_branch;
 	loader.RegisterFunction(use_branch);
 

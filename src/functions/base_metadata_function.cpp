@@ -61,7 +61,12 @@ static void MetadataFunctionExecute(ClientContext &context, TableFunctionInput &
 }
 
 DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(string name_p, table_function_bind_t bind)
-    : TableFunction(Identifier(std::move(name_p)), {LogicalType::VARCHAR}, MetadataFunctionExecute, bind,
+    : DuckLakeBaseMetadataFunction(std::move(name_p), {LogicalType::VARCHAR}, bind) {
+}
+
+DuckLakeBaseMetadataFunction::DuckLakeBaseMetadataFunction(string name_p, vector<LogicalType> arguments,
+                                                          table_function_bind_t bind)
+    : TableFunction(Identifier(std::move(name_p)), std::move(arguments), MetadataFunctionExecute, bind,
                     MetadataFunctionInit) {
 }
 

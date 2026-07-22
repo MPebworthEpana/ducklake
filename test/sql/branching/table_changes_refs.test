@@ -1,0 +1,60 @@
+# name: test/sql/branching/table_changes_refs.test
+# description: Phase 5 T4 — ref-aware table_changes/table_insertions ranges
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_table_changes_refs')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (100);
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.table_insertions('t', 'main', 'dev') ORDER BY i
+----
+100
+
+query TI
+SELECT change_type, i FROM ducklake.table_changes('t', 'main', 'dev') ORDER BY i, change_type
+----
+insert	100
+
+query I
+SELECT i FROM ducklake_table_insertions('ducklake', 'main', 't', 'main', 'dev') ORDER BY i
+----
+100
+
+query I
+SELECT count(*) FROM ducklake.table_insertions('t', 'dev', 'main') WHERE i = 100
+----
+0
+
+query I
+SELECT count(*) FROM ducklake.table_changes('t', 'main', 'main') WHERE i = 100
+----
+0

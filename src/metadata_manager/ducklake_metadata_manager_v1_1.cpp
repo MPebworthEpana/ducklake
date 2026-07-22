@@ -46,6 +46,11 @@ string DuckLakeMetadataManagerV1_1<Base>::GetCreateTableStatements() {
 		result += "CREATE TABLE {METADATA_CATALOG}.ducklake_ref(ref_id BIGINT PRIMARY KEY, ref_name VARCHAR, ref_type "
 		          "VARCHAR, snapshot_id BIGINT, parent_ref_id BIGINT, status VARCHAR, created_at TIMESTAMPTZ);\n";
 	}
+	if (version >= DuckLakeVersion::V1_1_DEV_4) {
+		result += "CREATE TABLE {METADATA_CATALOG}.ducklake_ref_log(log_id BIGINT PRIMARY KEY, ref_id BIGINT, "
+		          "ref_name VARCHAR, ref_type VARCHAR, from_snapshot_id BIGINT, to_snapshot_id BIGINT, "
+		          "operation VARCHAR, recorded_at TIMESTAMPTZ);\n";
+	}
 	if (version >= DuckLakeVersion::V1_1_DEV_3) {
 		result += "ALTER TABLE {METADATA_CATALOG}.ducklake_snapshot ADD COLUMN branch_id BIGINT DEFAULT 0;\n";
 		result += "ALTER TABLE {METADATA_CATALOG}.ducklake_schema ADD COLUMN branch_id BIGINT DEFAULT 0;\n";
@@ -85,6 +90,10 @@ string DuckLakeMetadataManagerV1_1<Base>::GetCreateTableStatements() {
 		result += "INSERT INTO {METADATA_CATALOG}.ducklake_branch_lineage VALUES (0, 0, 9223372036854775807);\n";
 		result +=
 		    "INSERT INTO {METADATA_CATALOG}.ducklake_ref VALUES (0, 'main', 'branch', 0, NULL, 'active', NOW());\n";
+	}
+	if (version >= DuckLakeVersion::V1_1_DEV_4) {
+		result +=
+		    "INSERT INTO {METADATA_CATALOG}.ducklake_ref_log VALUES (0, 0, 'main', 'branch', NULL, 0, 'create', NOW());\n";
 	}
 	return result;
 }

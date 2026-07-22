@@ -1,0 +1,75 @@
+# name: test/sql/branching/ref_history.test
+# description: Phase 5 T5 — ducklake_ref_history append-only ref log
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_ref_history', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+WHERE operation = 'create' AND from_snapshot_id IS NULL AND to_snapshot_id IS NOT NULL
+----
+1
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+----
+1
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+----
+1
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+query I
+SELECT count(*) FROM ducklake_ref_history('ducklake', 'dev')
+WHERE operation = 'commit'
+----
+1
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CALL ducklake.merge_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('main')
+WHERE operation = 'merge' AND commit_extra_info LIKE '%merge_source=dev%'
+----
+1
+
+statement ok
+CALL ducklake.create_branch('temp')
+
+statement ok
+CALL ducklake.drop_branch('temp')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('temp')
+WHERE operation = 'drop'
+----
+1

@@ -428,6 +428,8 @@ public:
 	virtual void MigrateV11(bool allow_failures = false);
 	//! 1.1-dev2 → 1.1-dev3: writable divergent branches
 	virtual void MigrateV12(bool allow_failures = false);
+	//! 1.1-dev3 → 1.1-dev4: append-only ref history log
+	virtual void MigrateV13(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 
@@ -440,7 +442,10 @@ public:
 	virtual bool TryResolveRef(const string &ref_name, const string &ref_type, DuckLakeRefInfo &out);
 	virtual set<idx_t> GetPinnedSnapshotIds();
 	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
-	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
+	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id,
+	                              const string &operation = "commit");
+	virtual void AppendRefLog(idx_t ref_id, const string &ref_name, const string &ref_type,
+	                          optional_idx from_snapshot_id, optional_idx to_snapshot_id, const string &operation);
 	//! Phase 3/4: merge source branch into target (FF when possible, else three-way).
 	//! Optional merge_tombstone_mode overrides catalog option: "convert_end_snapshot" (default) or "reown_tombstone".
 	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,

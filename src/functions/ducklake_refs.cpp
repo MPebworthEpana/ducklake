@@ -205,6 +205,70 @@ DuckLakeRefsFunction::DuckLakeRefsFunction() : DuckLakeBaseMetadataFunction("duc
 }
 
 //===--------------------------------------------------------------------===//
+// ducklake_ref_history
+//===--------------------------------------------------------------------===//
+static unique_ptr<FunctionData> DuckLakeRefHistoryBind(ClientContext &context, TableFunctionBindInput &input,
+                                                       vector<LogicalType> &return_types, vector<string> &names) {
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &ducklake_catalog = catalog.Cast<DuckLakeCatalog>();
+	if (!ducklake_catalog.SupportsRefLog()) {
+		throw InvalidInputException(
+		    "ducklake_ref_history requires DuckLake catalog version >= 1.1-dev4. "
+		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+	}
+	names.emplace_back("ref_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("ref_type");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("from_snapshot_id");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("to_snapshot_id");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("snapshot_time");
+	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
+	names.emplace_back("operation");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("author");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("commit_message");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("commit_extra_info");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("recorded_at");
+	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
+
+	auto result = make_uniq<MetadataBindData>();
+	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+	auto ref_name = StringValue::Get(input.inputs[1]);
+	auto query_result = transaction.GetMetadataManager().Query(StringUtil::Format(R"(
+SELECT l.ref_name, l.ref_type, l.from_snapshot_id, l.to_snapshot_id, s.snapshot_time, l.operation,
+       c.author, c.commit_message, c.commit_extra_info, l.recorded_at
+FROM {METADATA_CATALOG}.ducklake_ref_log l
+LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot s ON s.snapshot_id = l.to_snapshot_id
+LEFT JOIN {METADATA_CATALOG}.ducklake_snapshot_changes c ON c.snapshot_id = l.to_snapshot_id
+WHERE lower(l.ref_name) = lower(%s)
+ORDER BY l.log_id
+)",
+	                                                                        SQLString(ref_name)));
+	if (query_result->HasError()) {
+		query_result->GetErrorObject().Throw("Failed to query DuckLake ref history: ");
+	}
+	for (auto &row : *query_result) {
+		vector<Value> values;
+		for (idx_t col = 0; col < query_result->ColumnCount(); col++) {
+			values.push_back(row.GetChunk().GetValue(col, row.GetRowInChunk()));
+		}
+		result->rows.push_back(std::move(values));
+	}
+	return std::move(result);
+}
+
+DuckLakeRefHistoryFunction::DuckLakeRefHistoryFunction()
+    : DuckLakeBaseMetadataFunction("ducklake_ref_history", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+                                   DuckLakeRefHistoryBind) {
+}
+
+//===--------------------------------------------------------------------===//
 // ducklake_use_branch (Phase 2)
 //===--------------------------------------------------------------------===//
 struct UseBranchBindData : public TableFunctionData {
