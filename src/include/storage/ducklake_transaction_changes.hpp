@@ -63,6 +63,7 @@ struct SnapshotChangeInformation {
 	set<TableIndex> tables_inserted_inlined;
 	set<TableIndex> tables_deleted_inlined;
 	set<TableIndex> tables_flushed_inlined;
+	case_insensitive_set_t merged_branches;
 	static SnapshotChangeInformation ParseChangesMade(const string &changes_made);
 };
 

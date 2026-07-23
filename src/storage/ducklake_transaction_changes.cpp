@@ -27,7 +27,8 @@ enum class ChangeType {
 	CREATED_SCALAR_MACRO,
 	CREATED_TABLE_MACRO,
 	DROPPED_SCALAR_MACRO,
-	DROPPED_TABLE_MACRO
+	DROPPED_TABLE_MACRO,
+	MERGED_BRANCH
 };
 
 struct ParsedChange {
@@ -84,6 +85,8 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 	} else if (StringUtil::CIEquals(change_type_str, "flushed_inlined") ||
 	           StringUtil::CIEquals(change_type_str, "inline_flush")) {
 		return ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE;
+	} else if (StringUtil::CIEquals(change_type_str, "merged_branch")) {
+		return ChangeType::MERGED_BRANCH;
 	} else {
 		throw InvalidInputException("Unsupported change type %s", change_type_str);
 	}
@@ -212,6 +215,9 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE:
 			result.tables_flushed_inlined.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::MERGED_BRANCH:
+			result.merged_branches.insert(entry.change_value);
 			break;
 		default:
 			throw InternalException("Unsupported change type in ParseChangesMade");
@@ -346,6 +352,9 @@ void MergeSnapshotChangeInformation(SnapshotChangeInformation &target, const Sna
 	MergeSet(target.tables_inserted_inlined, other.tables_inserted_inlined);
 	MergeSet(target.tables_deleted_inlined, other.tables_deleted_inlined);
 	MergeSet(target.tables_flushed_inlined, other.tables_flushed_inlined);
+	for (auto &branch : other.merged_branches) {
+		target.merged_branches.insert(branch);
+	}
 }
 
 SnapshotChangeInformation FromTransactionChanges(const TransactionChangeInformation &changes) {

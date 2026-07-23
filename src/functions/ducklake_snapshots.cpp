@@ -4,6 +4,7 @@
 #include "storage/ducklake_transaction_changes.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
 
@@ -59,12 +60,79 @@ void DuckLakeSnapshotsFunction::GetSnapshotTypes(vector<LogicalType> &return_typ
 	return_types.emplace_back(LogicalType::VARCHAR);
 }
 
+void DuckLakeSnapshotsFunction::AppendProvenanceColumns(vector<LogicalType> &return_types, vector<string> &names) {
+	names.emplace_back("merge_source");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("merge_type");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("cherry_pick_source");
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("cherry_pick_snapshot");
+	return_types.emplace_back(LogicalType::BIGINT);
+	names.emplace_back("transplant_source");
+	return_types.emplace_back(LogicalType::VARCHAR);
+}
+
 void DuckLakeSnapshotsFunction::GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names) {
 	GetSnapshotTypes(return_types, names);
 	names.emplace_back("branch_id");
 	return_types.emplace_back(LogicalType::BIGINT);
 	names.emplace_back("branch_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	AppendProvenanceColumns(return_types, names);
+}
+
+static unordered_map<string, string> ParseCommitExtraInfo(const Value &commit_extra_info) {
+	unordered_map<string, string> result;
+	if (commit_extra_info.IsNull()) {
+		return result;
+	}
+	auto raw = StringValue::Get(commit_extra_info);
+	idx_t start = 0;
+	while (start < raw.size()) {
+		auto comma = raw.find(',', start);
+		auto token = comma == string::npos ? raw.substr(start) : raw.substr(start, comma - start);
+		auto eq = token.find('=');
+		if (eq != string::npos && eq > 0) {
+			result[token.substr(0, eq)] = token.substr(eq + 1);
+		}
+		if (comma == string::npos) {
+			break;
+		}
+		start = comma + 1;
+	}
+	return result;
+}
+
+static Value ExtraInfoString(const unordered_map<string, string> &extra, const string &key) {
+	auto entry = extra.find(key);
+	if (entry == extra.end()) {
+		return Value();
+	}
+	return Value(entry->second);
+}
+
+static Value ExtraInfoBigint(const unordered_map<string, string> &extra, const string &key) {
+	auto entry = extra.find(key);
+	if (entry == extra.end() || entry->second.empty()) {
+		return Value();
+	}
+	return Value::BIGINT(NumericCast<int64_t>(StringUtil::ToUnsigned(entry->second)));
+}
+
+void DuckLakeSnapshotsFunction::AppendProvenanceValues(vector<Value> &row_values, const Value &commit_extra_info) {
+	auto extra = ParseCommitExtraInfo(commit_extra_info);
+	auto merge_source = ExtraInfoString(extra, "merge_source");
+	auto merge_type = ExtraInfoString(extra, "merge_type");
+	// Three-way merges record merge_source without merge_type; FF sets merge_type=ff.
+	if (!merge_source.IsNull() && merge_type.IsNull()) {
+		merge_type = Value("three_way");
+	}
+	row_values.push_back(std::move(merge_source));
+	row_values.push_back(std::move(merge_type));
+	row_values.push_back(ExtraInfoString(extra, "cherry_pick_source"));
+	row_values.push_back(ExtraInfoBigint(extra, "cherry_pick_snapshot"));
+	row_values.push_back(ExtraInfoString(extra, "transplant_source"));
 }
 
 template <class T>
@@ -153,6 +221,10 @@ vector<Value> DuckLakeSnapshotsFunction::GetSnapshotValues(const DuckLakeSnapsho
 	PushIDChangeList(change_keys, change_values, other_changes.tables_flushed_inlined, "flushed_inlined");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_merge_adjacent, "merge_adjacent");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_rewrite_delete, "rewrite_delete");
+	if (!other_changes.merged_branches.empty()) {
+		change_keys.emplace_back("merged_branch");
+		change_values.push_back(NameListToValue(other_changes.merged_branches));
+	}
 
 	row_values.push_back(Value::MAP(LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
 	                                std::move(change_keys), std::move(change_values)));
@@ -214,6 +286,7 @@ static unique_ptr<FunctionData> DuckLakeSnapshotsBind(ClientContext &context, Ta
 				row_values.push_back(Value());
 			}
 			row_values.push_back(snapshot.branch_name.empty() ? Value() : Value(snapshot.branch_name));
+			DuckLakeSnapshotsFunction::AppendProvenanceValues(row_values, snapshot.commit_extra_info);
 		}
 		result->rows.push_back(std::move(row_values));
 	}

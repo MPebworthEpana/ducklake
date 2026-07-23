@@ -11,7 +11,7 @@ test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
 test-env DATA_PATH {TEST_DIR}
 
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_table_changes_refs')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_table_changes_refs', DATA_INLINING_ROW_LIMIT 0)
 
 statement ok
 CREATE TABLE ducklake.t(i INTEGER);
@@ -23,6 +23,9 @@ statement ok
 CALL ducklake.create_branch('dev')
 
 statement ok
+CALL ducklake.create_branch('other')
+
+statement ok
 INSERT INTO ducklake.t VALUES (2);
 
 statement ok
@@ -32,7 +35,20 @@ statement ok
 INSERT INTO ducklake.t VALUES (100);
 
 statement ok
+DELETE FROM ducklake.t WHERE i = 1;
+
+statement ok
+CALL ducklake.use_branch('other')
+
+statement ok
+INSERT INTO ducklake.t VALUES (200);
+
+statement ok
 CALL ducklake.use_branch('main')
+
+# Tag the post-fork main tip for mixed ref/snapshot bounds
+statement ok
+CALL ducklake.create_tag('main_tip')
 
 query I
 SELECT i FROM ducklake.table_insertions('t', 'main', 'dev') ORDER BY i
@@ -42,7 +58,14 @@ SELECT i FROM ducklake.table_insertions('t', 'main', 'dev') ORDER BY i
 query TI
 SELECT change_type, i FROM ducklake.table_changes('t', 'main', 'dev') ORDER BY i, change_type
 ----
+delete	1
 insert	100
+
+# Same-branch owned-file delete also appears in the change feed
+query I
+SELECT count(*) FROM ducklake.table_deletions('t', 'main', 'dev') WHERE i = 1
+----
+1
 
 query I
 SELECT i FROM ducklake_table_insertions('ducklake', 'main', 't', 'main', 'dev') ORDER BY i
@@ -58,3 +81,31 @@ query I
 SELECT count(*) FROM ducklake.table_changes('t', 'main', 'main') WHERE i = 100
 ----
 0
+
+# Cousin branches: only the end branch's delta from the shared ancestor
+query I
+SELECT i FROM ducklake.table_insertions('t', 'dev', 'other') ORDER BY i
+----
+200
+
+query I
+SELECT count(*) FROM ducklake.table_insertions('t', 'other', 'dev') WHERE i = 200
+----
+0
+
+# Tag bound uses the tagged snapshot's owning branch for filtering
+query I
+SELECT i FROM ducklake.table_insertions('t', 'main_tip', 'dev') ORDER BY i
+----
+100
+
+# Mixed BIGINT snapshot id + VARCHAR end ref: changes on dev since the tagged main tip
+statement ok
+SET VARIABLE main_tip_snap = (
+  SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main_tip'
+)
+
+query I
+SELECT i FROM ducklake.table_insertions('t', getvariable('main_tip_snap')::BIGINT, 'dev') ORDER BY i
+----
+100

@@ -48,6 +48,8 @@ public:
 
 	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<string> &names);
 	static void GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names);
+	static void AppendProvenanceColumns(vector<LogicalType> &return_types, vector<string> &names);
+	static void AppendProvenanceValues(vector<Value> &row_values, const Value &commit_extra_info);
 	static vector<Value> GetSnapshotValues(const DuckLakeSnapshotInfo &snapshot);
 };
 

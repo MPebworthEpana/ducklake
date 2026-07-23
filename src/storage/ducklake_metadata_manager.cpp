@@ -4295,10 +4295,11 @@ vector<DuckLakeDeleteScanEntry> DuckLakeMetadataManager::GetTableDeletions(DuckL
 	}
 
 	// Build the query with optional CTE for inlined deletions
-	// Deletes come in three flavors:
+	// Deletes come in four flavors:
 	// 1. Deletes stored in the ducklake_delete_file table (partial deletes)
 	// 2. Data files being deleted entirely through setting end_snapshot (full file deletes)
 	// 3. Inlined file deletions stored in the metadata database
+	// 4. Branch tombstones for inherited files (ducklake_deletion_data_file)
 	// For all deletes, we need to obtain any PREVIOUS deletes as well to exclude rows already deleted
 	string query;
 
@@ -4380,6 +4381,46 @@ USING (data_file_id), (
 	                            select_list, table_id.index, delete_event_branch_filter, table_id.index,
 	                            start_snapshot.snapshot_id, delete_event_branch_filter, table_id.index, select_list,
 	                            table_id.index, start_snapshot.snapshot_id, data_event_branch_filter, table_id.index);
+
+	if (transaction.GetCatalog().SupportsWritableBranches()) {
+		// Branch-local drop of an inherited file is recorded as a tombstone, not end_snapshot.
+		query += StringUtil::Format(R"(
+UNION ALL
+
+SELECT %s, data.deleted_at_snapshot FROM (
+	SELECT data.*, del.deleted_at_snapshot
+	FROM {METADATA_CATALOG}.ducklake_deletion_data_file del
+	JOIN {METADATA_CATALOG}.ducklake_data_file data ON data.data_file_id = del.object_id
+	WHERE del.branch_id = {BRANCH_ID}
+	  AND del.deleted_at_snapshot >= %d
+	  AND del.deleted_at_snapshot <= {SNAPSHOT_ID}
+	  AND data.table_id = %d
+) AS data
+LEFT JOIN LATERAL (
+	SELECT DISTINCT ON (data_file_id)
+		data_file_id,
+		path,
+		path_is_relative,
+		file_size_bytes,
+		footer_size,
+		encryption_key,
+		format
+	FROM {METADATA_CATALOG}.ducklake_delete_file
+	WHERE table_id = %d AND begin_snapshot < data.deleted_at_snapshot
+	ORDER BY data_file_id, begin_snapshot DESC
+) AS previous_delete
+USING (data_file_id), (
+	SELECT CAST(NULL AS VARCHAR) AS path,
+		CAST(NULL AS BOOLEAN) AS path_is_relative,
+		CAST(NULL AS BIGINT) AS file_size_bytes,
+		CAST(NULL AS BIGINT) AS footer_size,
+		CAST(NULL AS VARCHAR) AS encryption_key,
+		CAST(NULL AS VARCHAR) format
+) current_delete
+)",
+		                            select_list, start_snapshot.snapshot_id, table_id.index, table_id.index);
+	}
+
 
 	if (has_inlined_table) {
 		string null_file_cols = "CAST(NULL AS VARCHAR) AS path, CAST(NULL AS BOOLEAN) AS path_is_relative, CAST(NULL "
