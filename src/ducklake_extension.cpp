@@ -106,11 +106,26 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeRefsFunction refs;
 	loader.RegisterFunction(refs);
 
+	DuckLakeRefHistoryFunction ref_history;
+	loader.RegisterFunction(ref_history);
+
 	DuckLakeUseBranchFunction use_branch;
 	loader.RegisterFunction(use_branch);
 
 	DuckLakeMergeBranchFunction merge_branch;
 	loader.RegisterFunction(merge_branch);
+
+	DuckLakeCherryPickFunction cherry_pick;
+	loader.RegisterFunction(cherry_pick);
+
+	DuckLakeTransplantFunction transplant;
+	loader.RegisterFunction(transplant);
+
+	DuckLakeDiffFunction diff;
+	loader.RegisterFunction(diff);
+
+	DuckLakeConvertInliningLayoutFunction convert_inlining_layout;
+	loader.RegisterFunction(convert_inlining_layout);
 
 	auto table_changes = DuckLakeTableInsertionsFunction::GetDuckLakeTableChanges();
 	loader.RegisterFunction(*table_changes);

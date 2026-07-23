@@ -215,6 +215,8 @@ public:
 	//! Lineage + tombstone visibility for a versioned metadata row owned by `alias.branch_id`.
 	static string LineageIntervalVisibility(const string &alias, const string &object_id_column,
 	                                        const string &deletion_table);
+	//! Column variant: object_id packs (table_id << 32) | column_id because column_id is per-table.
+	static string ColumnLineageIntervalVisibility(const string &alias);
 	//! Pure SQL templates (use `{METADATA_CATALOG}` placeholder) — caller substitutes + executes.
 	//! Both used by the regular metadata-manager methods and by server-side commit, which runs the
 	//! SQL on a fresh Connection without going through the metadata-manager wrapper.
@@ -251,11 +253,13 @@ public:
 	                                                                  DuckLakeFileSizeOptions options);
 	virtual idx_t GetBeginSnapshotForTable(TableIndex table_id);
 	virtual idx_t GetBeginSnapshotForSchemaVersion(TableIndex table_id, idx_t schema_version);
+	//! Cap snapshot_id by lineage max_visible for the branch that owns `inlined_table_name`.
+	idx_t GetEffectiveInlinedReadSnapshot(DuckLakeSnapshot snapshot, const string &inlined_table_name);
 	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
 	virtual idx_t GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot);
 	//! SQL builders for stats-refresh metadata lookups; caller substitutes placeholders + executes.
 	static string GetNetDataFileRowCountSql(TableIndex table_id, const string &inlined_deletion_table);
-	static string GetNetInlinedRowCountSql(const string &inlined_table_name);
+	static string GetNetInlinedRowCountSql(const string &inlined_table_name, bool shared_layout = false);
 	static string GetTableColumnSchemaSql(TableIndex table_id);
 	static string GetInlinedTableNamesSql(TableIndex table_id);
 	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
@@ -307,11 +311,12 @@ public:
 	                                   const vector<DuckLakeInlinedDataInfo> &new_data,
 	                                   const vector<DuckLakeTableInfo> &new_tables,
 	                                   const vector<DuckLakeTableInfo> &new_inlined_data_tables_result);
-	static string WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes);
+	static string WriteNewInlinedDeletes(const vector<DuckLakeDeletedInlinedDataInfo> &new_deletes,
+	                                     bool shared_layout = false);
 	//! Creates the INSERT INTO {METADATA_CATALOG}.<inlined_table_name> VALUES (...) batch.
 	static string FormatInlinedDataInsert(const string &inlined_table_name, idx_t row_id_start,
 	                                      bool has_preserved_row_ids, const vector<int64_t> *row_ids,
-	                                      const vector<string> &cells_per_row);
+	                                      const vector<string> &cells_per_row, bool shared_layout = false);
 	virtual string WriteNewInlinedFileDeletes(DuckLakeSnapshot &commit_snapshot,
 	                                          const vector<DuckLakeInlinedFileDeletionInfo> &new_deletes);
 	//! Static deterministic name of the per-table inlined deletion table.
@@ -330,10 +335,12 @@ public:
 	virtual string GetInlinedTableQueries(DuckLakeSnapshot commit_snapshot, const DuckLakeTableInfo &table,
 	                                      string &inlined_tables, string &inlined_table_queries);
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version);
-	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id);
-	static string InlinedTableDdlSql(const string &table_name, const string &column_defs);
+	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id,
+	                                  bool shared_layout = false);
+	static string InlinedTableDdlSql(const string &table_name, const string &column_defs,
+	                                 bool shared_layout = false);
 	static string InlinedTableRegistrationTuple(idx_t table_id, const string &table_name, idx_t schema_version);
-	static string LatestInlinedTableQuery(idx_t table_id);
+	static string LatestInlinedTableQuery(idx_t table_id, bool shared_layout = false);
 	static string DropDataFiles(const set<DataFileIndex> &dropped_files);
 	static string DropDeleteFiles(const set<DataFileIndex> &dropped_files);
 	//! Caller supplies one resolved path per overwritten file, in the same order.
@@ -385,7 +392,8 @@ public:
 	                                                           const vector<string> &columns_to_read);
 	//! SQL builders for the stats-refresh queries used by DuckLakeTransactionState::RecomputeGlobalStatsAfterRewrite.
 	//! Caller substitutes `{METADATA_CATALOG}` / `{SNAPSHOT_ID}` and executes via the commit context's executor.
-	static string ReadInlinedDataAggregatesSql(const string &inlined_table_name, const string &select_list);
+	static string ReadInlinedDataAggregatesSql(const string &inlined_table_name, const string &select_list,
+	                                           bool shared_layout = false);
 	static string ReadFileColumnStatsForTableSql(TableIndex table_id);
 	virtual shared_ptr<DuckLakeInlinedData> TransformInlinedData(QueryResult &result,
 	                                                             const vector<LogicalType> &expected_types);
@@ -394,7 +402,8 @@ public:
 	//! We delete at the flush
 	virtual void DeleteFlushedInlinedData(const DuckLakeInlinedTableInfo &inlined_table, idx_t flush_snapshot_id);
 	//! If it conflicts we batch everything at the retry
-	static string GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables);
+	static string GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables,
+	                                               bool shared_layout = false);
 	static string InsertNewSchema(const DuckLakeSnapshot &snapshot, const set<TableIndex> &table_ids);
 
 	virtual vector<DuckLakeSnapshotInfo> GetAllSnapshots(const string &filter = string());
@@ -419,6 +428,8 @@ public:
 	virtual void MigrateV11(bool allow_failures = false);
 	//! 1.1-dev2 → 1.1-dev3: writable divergent branches
 	virtual void MigrateV12(bool allow_failures = false);
+	//! 1.1-dev3 → 1.1-dev4: append-only ref history log
+	virtual void MigrateV13(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 
@@ -431,11 +442,23 @@ public:
 	virtual bool TryResolveRef(const string &ref_name, const string &ref_type, DuckLakeRefInfo &out);
 	virtual set<idx_t> GetPinnedSnapshotIds();
 	//! Advance a branch head (Phase 2). Tags never advance. Throws on CAS mismatch.
-	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id);
+	virtual void UpdateBranchHead(idx_t ref_id, idx_t expected_snapshot_id, idx_t new_snapshot_id,
+	                              const string &operation = "commit");
+	virtual void AppendRefLog(idx_t ref_id, const string &ref_name, const string &ref_type,
+	                          optional_idx from_snapshot_id, optional_idx to_snapshot_id, const string &operation);
 	//! Phase 3/4: merge source branch into target (FF when possible, else three-way).
 	//! Optional merge_tombstone_mode overrides catalog option: "convert_end_snapshot" (default) or "reown_tombstone".
 	virtual DuckLakeMergeBranchResult MergeBranch(const string &source_branch, const string &target_branch,
 	                                              bool dry_run, const string &merge_tombstone_mode = string());
+	//! Phase 5: apply exactly one source branch snapshot as a new target branch snapshot.
+	virtual DuckLakeCherryPickResult CherryPick(const string &source_branch, idx_t snapshot_id,
+	                                            const string &target_branch, bool dry_run);
+	//! Phase 5: apply a source-owned snapshot range onto a target branch after one combined validation.
+	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot,
+	                                            idx_t end_snapshot, const string &target_branch, bool dry_run);
+	//! Phase 5: catalog-level diff between two refs.
+	virtual vector<DuckLakeDiffResult> DiffRefs(const string &ref_a, const string &ref_b);
+	virtual DuckLakeConvertInliningLayoutResult ConvertInliningLayout(const string &target_layout, bool dry_run);
 	//! Snapshots visible on a branch (own + lineage-capped ancestors).
 	virtual vector<DuckLakeSnapshotInfo> GetSnapshotsForBranch(idx_t branch_id, const string &filter = string());
 	//! Aggregate snapshot_changes for a branch in (after_snapshot, through_snapshot].

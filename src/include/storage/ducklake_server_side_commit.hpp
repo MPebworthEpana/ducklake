@@ -78,6 +78,8 @@ private:
 	bool ReadSupportsV1_1Metadata();
 	//! Whether the metadata schema supports writable divergent branches (>= 1.1-dev3).
 	bool ReadSupportsWritableBranches();
+	//! Effective inlined-data physical layout.
+	string ReadInliningLayout();
 	//! Build a DuckLakeTableStats from parsed global stats.
 	unique_ptr<DuckLakeTableStats> BuildTableStats(const DuckLakeGlobalStatsInfo &gs);
 	//! Build a full DuckLakeStats map from global stats.
@@ -105,6 +107,7 @@ private:
 	Connection fresh_conn;
 	DuckLakeRetryConfig retry_config;
 	bool supports_writable_branches = false;
+	bool shared_inlining_layout = true;
 
 	DuckLakeNameMapSet new_name_maps;
 	unique_ptr<DuckLakeTransactionState> state;

@@ -37,6 +37,7 @@ struct MetadataBindData : public TableFunctionData {
 class DuckLakeBaseMetadataFunction : public TableFunction {
 public:
 	DuckLakeBaseMetadataFunction(string name, table_function_bind_t bind);
+	DuckLakeBaseMetadataFunction(string name, vector<LogicalType> arguments, table_function_bind_t bind);
 
 	static Catalog &GetCatalog(ClientContext &context, const Value &input);
 };
@@ -47,6 +48,8 @@ public:
 
 	static void GetSnapshotTypes(vector<LogicalType> &return_types, vector<string> &names);
 	static void GetSnapshotTypesWithBranch(vector<LogicalType> &return_types, vector<string> &names);
+	static void AppendProvenanceColumns(vector<LogicalType> &return_types, vector<string> &names);
+	static void AppendProvenanceValues(vector<Value> &row_values, const Value &commit_extra_info);
 	static vector<Value> GetSnapshotValues(const DuckLakeSnapshotInfo &snapshot);
 };
 
@@ -136,6 +139,11 @@ public:
 	DuckLakeRefsFunction();
 };
 
+class DuckLakeRefHistoryFunction : public DuckLakeBaseMetadataFunction {
+public:
+	DuckLakeRefHistoryFunction();
+};
+
 class DuckLakeUseBranchFunction : public TableFunction {
 public:
 	DuckLakeUseBranchFunction();
@@ -144,6 +152,26 @@ public:
 class DuckLakeMergeBranchFunction : public TableFunction {
 public:
 	DuckLakeMergeBranchFunction();
+};
+
+class DuckLakeCherryPickFunction : public TableFunction {
+public:
+	DuckLakeCherryPickFunction();
+};
+
+class DuckLakeTransplantFunction : public TableFunction {
+public:
+	DuckLakeTransplantFunction();
+};
+
+class DuckLakeDiffFunction : public TableFunction {
+public:
+	DuckLakeDiffFunction();
+};
+
+class DuckLakeConvertInliningLayoutFunction : public TableFunction {
+public:
+	DuckLakeConvertInliningLayoutFunction();
 };
 
 class DuckLakeOptionsFunction : public DuckLakeBaseMetadataFunction {

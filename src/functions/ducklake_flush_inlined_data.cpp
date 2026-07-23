@@ -120,6 +120,9 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 	if (!global_state.written_files.empty()) {
 		DeletesPerFile deletes_per_file;
 		auto partition_sql_exprs = table.GetPartitionSQLExpressions();
+		auto &catalog = table.catalog.Cast<DuckLakeCatalog>();
+		const bool shared_layout = catalog.SupportsWritableBranches() && catalog.GetInliningLayout() == "shared_table";
+		const string branch_filter = shared_layout ? " AND branch_id = {BRANCH_ID}" : "";
 
 		// Track cumulative row offset per partition so each file knows its range
 		unordered_map<string, idx_t> partition_row_offsets;
@@ -151,14 +154,15 @@ SinkFinalizeType DuckLakeFlushData::Finalize(Pipeline &pipeline, Event &event, C
 				WITH all_rows AS (
 					SELECT end_snapshot, ROW_NUMBER() OVER (ORDER BY %s) - 1 AS output_position
 					FROM {METADATA_CATALOG}.%s
-					WHERE {SNAPSHOT_ID} >= begin_snapshot%s
+					WHERE {SNAPSHOT_ID} >= begin_snapshot%s%s
 				)
 				SELECT end_snapshot, output_position
 				FROM all_rows
 				WHERE end_snapshot IS NOT NULL
 				AND output_position >= %d AND output_position < %d;)",
-			                                                        order_by, inlined_table.table_name, extra_filter,
-			                                                        file_offset, file_offset + file.row_count));
+			                                                        order_by, SQLIdentifier(inlined_table.table_name),
+			                                                        extra_filter, branch_filter, file_offset,
+			                                                        file_offset + file.row_count));
 
 			for (auto &row : *deleted_rows_result) {
 				auto end_snap = row.GetValue<int64_t>(0);
@@ -288,6 +292,7 @@ unique_ptr<LogicalOperator> DuckLakeDataFlusher::GenerateFlushCommand() {
 	DuckLakeSnapshot snapshot(
 	    catalog.GetBeginSnapshotForSchemaVersion(table_id, inlined_table.schema_version, transaction),
 	    inlined_table.schema_version, 0, 0);
+	snapshot.branch_id = transaction.GetSnapshot().branch_id;
 
 	auto entry = catalog.GetEntryById(transaction, snapshot, table_id);
 	if (!entry) {

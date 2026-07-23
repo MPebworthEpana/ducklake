@@ -383,7 +383,9 @@ shared_ptr<BaseFileReader> DuckLakeMultiFileReader::TryCreateInlinedDataReader(c
 		auto &catalog = transaction->GetCatalog();
 		DuckLakeSnapshot snapshot(catalog.GetBeginSnapshotForSchemaVersion(read_info.table.GetTableId(),
 		                                                                   schema_version.GetIndex(), *transaction),
-		                          schema_version.GetIndex(), 0, 0);
+		                          schema_version.GetIndex(), read_info.snapshot.next_catalog_id,
+		                          read_info.snapshot.next_file_id);
+		snapshot.branch_id = read_info.snapshot.branch_id;
 		auto entry = catalog.GetEntryById(*transaction, snapshot, read_info.table.GetTableId());
 		if (!entry) {
 			return nullptr;

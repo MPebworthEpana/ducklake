@@ -1,5 +1,5 @@
 # name: test/sql/branching/writable_branch_inlining.test
-# description: H3 G4 — inlining enabled on non-main branches with per-branch isolation
+# description: H3 G4 — shared-table inlining enabled on non-main branches with isolation
 # group: [branching]
 
 require ducklake
@@ -43,6 +43,16 @@ SELECT * FROM ducklake.t ORDER BY i
 ----
 1
 
+query II
+SELECT COUNT(DISTINCT table_name), COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+----
+1	1
+
+query I
+SELECT COUNT(DISTINCT branch_id) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1
+----
+2
+
 statement ok con1
 INSERT INTO ducklake.t VALUES (2);
 
@@ -51,6 +61,11 @@ SELECT * FROM ducklake.t ORDER BY i
 ----
 1
 2
+
+query II
+SELECT COUNT(DISTINCT table_name), COUNT(*) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_tables
+----
+1	1
 
 # Branch must not see main's post-fork insert
 statement ok

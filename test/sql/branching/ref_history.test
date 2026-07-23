@@ -1,0 +1,162 @@
+# name: test/sql/branching/ref_history.test
+# description: Phase 5 T5 — ducklake_ref_history append-only ref log
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_ref_history', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+WHERE operation = 'create' AND from_snapshot_id IS NULL AND to_snapshot_id IS NOT NULL
+----
+1
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+----
+1
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('dev')
+----
+1
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+query I
+SELECT count(*) FROM ducklake_ref_history('ducklake', 'dev')
+WHERE operation = 'commit'
+----
+1
+
+# Fast-forward merge: main has not diverged
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CALL ducklake.merge_branch('dev')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('main')
+WHERE operation = 'merge' AND commit_extra_info LIKE '%merge_source=dev%'
+----
+1
+
+query I
+SELECT CASE WHEN merge_source = 'dev' AND merge_type = 'ff' THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main')
+----
+1
+
+# Three-way merge path after divergence
+statement ok
+CALL ducklake.create_branch('feature')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+INSERT INTO ducklake.t VALUES (10);
+
+statement ok
+CALL ducklake.use_branch('feature')
+
+statement ok
+INSERT INTO ducklake.t VALUES (20);
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CALL ducklake.merge_branch('feature')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('main')
+WHERE operation = 'merge' AND commit_extra_info LIKE '%merge_source=feature%'
+----
+1
+
+query I
+SELECT CASE WHEN merge_source = 'feature' AND merge_type = 'three_way' THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main')
+----
+1
+
+# Cherry-pick records both ref history and snapshot provenance columns
+statement ok
+CALL ducklake.create_branch('pick_src')
+
+statement ok
+CALL ducklake.use_branch('pick_src')
+
+statement ok
+INSERT INTO ducklake.t VALUES (30);
+
+statement ok
+INSERT INTO ducklake.t VALUES (31);
+
+statement ok
+SET VARIABLE pick_snap = (
+  SELECT snapshot_id FROM (
+    SELECT snapshot_id, row_number() OVER (ORDER BY snapshot_id) AS rn
+    FROM ducklake.snapshots(branch := 'pick_src')
+    WHERE branch_name = 'pick_src' AND changes::VARCHAR LIKE '%insert%'
+  ) WHERE rn = 1
+)
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('pick_src', getvariable('pick_snap')::UBIGINT, target := 'main')
+----
+cherry_pick
+
+query I
+SELECT count(*) FROM ducklake.ref_history('main')
+WHERE operation = 'cherry_pick'
+----
+1
+
+query I
+SELECT CASE WHEN cherry_pick_source = 'pick_src' AND cherry_pick_snapshot IS NOT NULL THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main')
+----
+1
+
+statement ok
+CALL ducklake.create_branch('temp')
+
+statement ok
+CALL ducklake.drop_branch('temp')
+
+query I
+SELECT count(*) FROM ducklake.ref_history('temp')
+WHERE operation = 'drop'
+----
+1

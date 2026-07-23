@@ -203,6 +203,7 @@ public:
 		auto require = GetConfigOption<string>("require_commit_message", {}, {}, "false");
 		return require == "true";
 	}
+	string GetInliningLayout() const;
 
 	void EnsureCommitInfoProvided(const DuckLakeSnapshotCommit &commit_info) const;
 
@@ -243,6 +244,10 @@ public:
 	//! Whether the metadata schema supports writable divergent branches (added in 1.1-dev3)
 	bool SupportsWritableBranches() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_3;
+	}
+	//! Whether the metadata schema has the append-only ref history log (added in 1.1-dev4)
+	bool SupportsRefLog() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_4;
 	}
 
 	//! Per-connection writable branch session (`ducklake_use_branch`). Survives auto-commit.
@@ -311,7 +316,7 @@ public:
 
 	//! Invalidate the cached table stats entry for a given stats cache key.
 	void InvalidateTableStatsCache(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0);
-	//! Invalidate the cached schema entry for a given schema_version.
+	//! Invalidate cached schema entries for a given schema_version across all branches that have been cached.
 	void InvalidateSchemaCache(idx_t schema_version);
 	//! Invalidate a cached name map for a deleted mapping ID.
 	void InvalidateNameMapCache(MappingIndex mapping_id);
@@ -326,7 +331,8 @@ private:
 	void PinSchemaForQuery(DuckLakeTransaction &transaction, shared_ptr<DuckLakeSchemaCacheEntry> entry);
 	void LoadNameMaps(DuckLakeTransaction &transaction);
 	string StatsCacheKey(idx_t next_file_id, TableIndex table_id, idx_t branch_id = 0) const;
-	string SchemaCacheKey(idx_t schema_version) const;
+	//! Schema cache is branch-scoped: inlined-table lists and lineage visibility differ per branch.
+	string SchemaCacheKey(idx_t schema_version, idx_t branch_id) const;
 	string SchemaPinStateKey() const;
 	ObjectCache &GetObjectCacheInstance();
 
@@ -361,6 +367,9 @@ private:
 	//! Table IDs where the inlined deletion table is known to NOT exist, with the snapshot_id at which we checked
 	//! Valid as long as current snapshot.snapshot_id <= cached snapshot_id
 	unordered_map<idx_t, idx_t> inlined_deletion_not_exists;
+	//! Branch ids that have been inserted into the schema ObjectCache (for InvalidateSchemaCache fan-out).
+	mutex schema_cache_branches_lock;
+	unordered_set<idx_t> schema_cache_branch_ids;
 	//! The id of the last committed snapshot, set at FlushChanges on a successful commit
 	mutable mutex commit_lock;
 	optional_idx last_committed_snapshot;
