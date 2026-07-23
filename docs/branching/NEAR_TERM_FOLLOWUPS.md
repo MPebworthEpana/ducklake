@@ -76,6 +76,9 @@ Highest user pain when `DATA_INLINING_ROW_LIMIT > 0`.
 - Tests: pick/transplant with inlining enabled; dry_run; conflict with concurrent
   inlined delete on target.
 
+**Status.** Shipped: `ApplyCherryPickInlinedData` +
+`test/sql/branching/cherry_pick_inlined.test`.
+
 #### F1.2 — Compose-clean DDL
 
 Apply schema/table/view/macro creates, alters, and drops that the merge conflict
@@ -91,6 +94,10 @@ taxonomy already understands.
   drop table only if not referenced on target; conflict when target altered the same
   table.
 
+**Status (partial).** CREATE TABLE apply shipped (`ApplyCherryPickCreatedTables`) with
+tests `cherry_pick_create_table.test` and `transplant_create_table_inlined.test`. Still
+fail-closed for ALTER/DROP, views, macros, and CREATE SCHEMA.
+
 #### F1.3 — Compaction snapshots (optional / later within F1)
 
 Compaction rewrites files without user-visible row identity changes but reshapes
@@ -101,6 +108,8 @@ file/delete metadata. Treat as **opt-in second phase** after F1.1–F1.2:
   target instead”).
 - Default recommendation: **keep reject** until there is a concrete user demand;
   document the workaround (merge the branch, or re-run compaction on target).
+
+**Decision.** Keep reject. Workaround: merge the branch, or compact on the target.
 
 ### Non-goals for F1
 
@@ -178,8 +187,9 @@ on the [ducklake.select](https://ducklake.select) docs site (Guides / Advanced F
 - No stale “DML-only cherry-pick” wording once F1 slices land (update in lockstep).
 
 **Prep note.** In-repo guide points operators at the Needs Documentation /
-`ducklake-web` publish path; cherry-pick limitations already match F1.1 (inlined DML
-supported; DDL/compaction still not).
+`ducklake-web` publish path; cherry-pick limitations match F1.1–F1.2 (inlined DML +
+CREATE TABLE supported; other DDL/compaction still not). Publishing the live
+ducklake.select page remains an out-of-repo `ducklake-web` change.
 
 ### Risks
 
@@ -227,6 +237,21 @@ triage**, not inventing a new CI workflow from scratch.
   skipped with justified `skip_tests` entries).
 - No silent bitrot: CI fails when a previously green branching test regresses on those
   backends.
+
+### Baseline (this follow-ups pass)
+
+| Backend | How covered | Local note |
+|---|---|---|
+| DuckDB catalog | `unittest "test/sql/branching/*"` (+ refs) | Primary day-to-day signal |
+| SQLite catalog | `Catalogs.yml` → `test/configs/sqlite.json` + `test/sql/*` | Requires `ENABLE_SQLITE_SCANNER=ON` build |
+| Postgres catalog | `Catalogs.yml` → `test/configs/postgres.json` + `test/sql/*` | Requires `ENABLE_POSTGRES_SCANNER=ON` + Postgres service |
+
+No branching/refs paths are presently listed under `skip_tests` in
+`test/configs/{sqlite,postgres}.json`. Portable tests avoid DuckDB-only
+`__ducklake_metadata_*` schema names where practical (e.g. cherry-pick inlined /
+CREATE TABLE suites). Full PG/SQLite matrix confirmation remains the CI
+`Catalogs.yml` job; local agent images without those scanners cannot re-run that
+matrix here.
 
 ### Risks
 

@@ -238,17 +238,19 @@ Apply selected commits from one branch onto another without merging the whole
 branch.
 
 ```sql
--- Single snapshot (DML inserts/deletes: data-file and inlined)
+-- Single snapshot (DML inserts/deletes: data-file and inlined; CREATE TABLE)
 FROM cherry_pick('feature', 42, target := 'main', dry_run := true);
 CALL cherry_pick('feature', 42, target := 'main');
 
--- Contiguous range (all-or-nothing)
+-- Contiguous range (all-or-nothing), including CREATE TABLE then DML
 CALL transplant('feature', 40, 42, target := 'main');
 ```
 
 Current limitations (fail closed):
 
-- DDL, flushed-inlined, and compaction snapshots are not supported yet.
+- CREATE TABLE cherry-pick/transplant is supported (same `table_id` / UUID copied onto
+  the target when the object is new there). Other DDL (ALTER/DROP, views, macros,
+  schemas), flushed-inlined, and compaction snapshots are not supported yet.
 - Inlined insert/delete cherry-pick and transplant are supported (shared_table default;
   per-branch layout is handled when present). Deletes of inherited inlined parent rows
   that were never remapped onto the target may not apply.
@@ -363,8 +365,9 @@ Attach options: `BRANCH 'name'`, `AUTOMATIC_MIGRATION TRUE`.
 
 - **Rebase** (rewrite a branch onto a new base) is not a first-class command;
   transplant + careful ref management can approximate it later.
-- **Cherry-pick/transplant** support DML inserts/deletes (data-file and inlined);
-  DDL, flushed-inlined, and compaction snapshots are not supported yet.
+- **Cherry-pick/transplant** support DML inserts/deletes (data-file and inlined) and
+  CREATE TABLE; other DDL, flushed-inlined, and compaction snapshots are not
+  supported yet.
 - **Per-ref access control** is left to the metadata database / permissions layer.
 - Unbranched catalogs remain fully supported; branching features activate with
   the `1.1-dev*` metadata migrations above.

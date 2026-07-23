@@ -1266,15 +1266,30 @@ static bool CreatedMapEmpty(const case_insensitive_map_t<case_insensitive_map_t<
 	return true;
 }
 
+static bool HasNonTableCreates(const SnapshotChangeInformation &changes) {
+	for (auto &schema_entry : changes.created_tables) {
+		for (auto &entry : schema_entry.second) {
+			if (!StringUtil::CIEquals(entry.second, "table")) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static bool HasCreatedTables(const SnapshotChangeInformation &changes) {
+	return !CreatedMapEmpty(changes.created_tables);
+}
+
 static string CherryPickUnsupportedReason(const SnapshotChangeInformation &changes) {
-	// Supported apply surface today: data-file DML + inlined_insert/inlined_delete.
-	// Still fail-closed for DDL, flushed_inlined, and compaction.
+	// Supported apply surface: data-file DML + inlined_insert/inlined_delete + CREATE TABLE.
+	// Still fail-closed for other DDL, flushed_inlined, and compaction.
 	if (!changes.created_schemas.empty() || !changes.dropped_schemas.empty() ||
-	    !CreatedMapEmpty(changes.created_tables) || !CreatedMapEmpty(changes.created_scalar_macros) ||
-	    !CreatedMapEmpty(changes.created_table_macros) || !changes.altered_tables.empty() ||
-	    !changes.altered_views.empty() || !changes.dropped_tables.empty() || !changes.dropped_views.empty() ||
-	    !changes.dropped_scalar_macros.empty() || !changes.dropped_table_macros.empty()) {
-		return "DDL changes";
+	    !CreatedMapEmpty(changes.created_scalar_macros) || !CreatedMapEmpty(changes.created_table_macros) ||
+	    !changes.altered_tables.empty() || !changes.altered_views.empty() || !changes.dropped_tables.empty() ||
+	    !changes.dropped_views.empty() || !changes.dropped_scalar_macros.empty() ||
+	    !changes.dropped_table_macros.empty() || HasNonTableCreates(changes)) {
+		return "unsupported DDL changes";
 	}
 	if (!changes.tables_flushed_inlined.empty()) {
 		return "flushed inlined-data changes";
@@ -1634,10 +1649,14 @@ static void ValidateCherryPickDependencies(DuckLakeMetadataManager &manager, con
                                            const DuckLakeRefInfo &target_ref,
                                            const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id,
                                            const SnapshotChangeInformation &source_delta, const string &operation,
-                                           const set<idx_t> &source_data_files_created_by_range) {
+                                           const set<idx_t> &source_data_files_created_by_range,
+                                           const set<idx_t> &source_tables_created_by_range) {
 	set<TableIndex> touched_tables;
 	AddChangedTables(touched_tables, source_delta);
 	for (auto &table_id : touched_tables) {
+		if (source_tables_created_by_range.find(table_id.index) != source_tables_created_by_range.end()) {
+			continue;
+		}
 		CheckCherryPickTableVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, table_id);
 	}
 
@@ -1689,6 +1708,107 @@ WHERE branch_id = %llu AND begin_snapshot = %llu
 	}
 	for (auto &row : *result) {
 		created_files.insert(row.GetValue<idx_t>(0));
+	}
+}
+
+static void AddSourceTablesCreatedAt(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
+                                     idx_t source_snapshot_id, set<idx_t> &created_tables) {
+	auto result = manager.Query(StringUtil::Format(R"(
+SELECT table_id
+FROM {METADATA_CATALOG}.ducklake_table
+WHERE branch_id = %llu AND begin_snapshot = %llu
+)",
+	                                               source_ref.ref_id, source_snapshot_id));
+	if (result->HasError()) {
+		result->GetErrorObject().Throw("Failed to read source tables for transplant dependency validation: ");
+	}
+	for (auto &row : *result) {
+		created_tables.insert(row.GetValue<idx_t>(0));
+	}
+}
+
+static void ValidateCherryPickCreatedTables(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
+                                            const DuckLakeRefInfo &target_ref,
+                                            const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id,
+                                            const SnapshotChangeInformation &source_delta, const string &operation) {
+	if (!HasCreatedTables(source_delta)) {
+		return;
+	}
+	auto created = manager.Query(StringUtil::Format(R"(
+SELECT table_id, schema_id, table_name
+FROM {METADATA_CATALOG}.ducklake_table
+WHERE branch_id = %llu AND begin_snapshot = %llu
+)",
+	                                                source_ref.ref_id, source_snapshot_id));
+	if (created->HasError()) {
+		created->GetErrorObject().Throw(StringUtil::Format("Failed to inspect %s created tables: ", operation));
+	}
+	bool found_any = false;
+	for (auto &row : *created) {
+		found_any = true;
+		auto table_id = row.GetValue<idx_t>(0);
+		auto schema_id = row.GetValue<idx_t>(1);
+		auto table_name = row.GetValue<string>(2);
+
+		auto id_conflict = manager.Query(StringUtil::Format(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_table
+WHERE table_id = %llu AND branch_id = %llu
+LIMIT 1
+)",
+		                                                    table_id, target_ref.ref_id));
+		if (id_conflict->HasError()) {
+			id_conflict->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to verify %s table id uniqueness: ", operation));
+		}
+		for (auto &conflict_row : *id_conflict) {
+			(void)conflict_row;
+			throw InvalidInputException(
+			    "Cannot %s snapshot %llu: table id %llu already exists on target branch \"%s\"", operation,
+			    source_snapshot_id, table_id, target_ref.ref_name);
+		}
+
+		auto visible_id = manager.Query(target_snapshot, StringUtil::Format(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_table tbl
+WHERE tbl.table_id = %llu AND {VISIBLE_TABLE}
+LIMIT 1
+)",
+		                                                                    table_id));
+		if (visible_id->HasError()) {
+			visible_id->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to verify %s table id visibility: ", operation));
+		}
+		for (auto &conflict_row : *visible_id) {
+			(void)conflict_row;
+			throw InvalidInputException(
+			    "Cannot %s snapshot %llu: table id %llu is already visible on target branch \"%s\"", operation,
+			    source_snapshot_id, table_id, target_ref.ref_name);
+		}
+
+		auto name_conflict = manager.Query(target_snapshot, StringUtil::Format(R"(
+SELECT 1
+FROM {METADATA_CATALOG}.ducklake_table tbl
+WHERE tbl.schema_id = %llu AND tbl.table_name = %s AND {VISIBLE_TABLE}
+LIMIT 1
+)",
+		                                                                       schema_id, SQLString(table_name)));
+		if (name_conflict->HasError()) {
+			name_conflict->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to verify %s table name uniqueness: ", operation));
+		}
+		for (auto &conflict_row : *name_conflict) {
+			(void)conflict_row;
+			throw InvalidInputException(
+			    "Cannot %s snapshot %llu: table \"%s\" already exists on target branch \"%s\"", operation,
+			    source_snapshot_id, table_name, target_ref.ref_name);
+		}
+	}
+	if (!found_any) {
+		throw InvalidInputException(
+		    "Cannot %s snapshot %llu: changes_made reports created_table but no matching ducklake_table rows "
+		    "were found on source branch \"%s\"",
+		    operation, source_snapshot_id, source_ref.ref_name);
 	}
 }
 
@@ -2002,6 +2122,162 @@ WHERE src.begin_snapshot = %llu
 	return stats_delta;
 }
 
+struct CreatedTableApplyStats {
+	idx_t table_count = 0;
+	idx_t max_table_id = 0;
+	idx_t max_table_schema_version = 0;
+};
+
+static CreatedTableApplyStats ApplyCherryPickCreatedTables(DuckLakeMetadataManager &manager,
+                                                           const DuckLakeRefInfo &source_ref,
+                                                           const DuckLakeRefInfo &target_ref, idx_t picked_id,
+                                                           idx_t new_head, bool shared_layout,
+                                                           const string &operation) {
+	CreatedTableApplyStats stats;
+	auto created = manager.Query(StringUtil::Format(R"(
+SELECT table_id,
+       COALESCE((
+         SELECT MAX(sv.schema_version)
+         FROM {METADATA_CATALOG}.ducklake_schema_versions sv
+         WHERE sv.table_id = t.table_id AND sv.begin_snapshot = t.begin_snapshot
+       ), (
+         SELECT MAX(idt.schema_version)
+         FROM {METADATA_CATALOG}.ducklake_inlined_data_tables idt
+         WHERE idt.table_id = t.table_id AND idt.branch_id = t.branch_id
+       ), %llu)
+FROM {METADATA_CATALOG}.ducklake_table t
+WHERE t.branch_id = %llu AND t.begin_snapshot = %llu
+ORDER BY t.table_id
+)",
+	                                                picked_id, source_ref.ref_id, picked_id));
+	if (created->HasError()) {
+		created->GetErrorObject().Throw(StringUtil::Format("Failed to list %s created tables: ", operation));
+	}
+
+	vector<pair<idx_t, idx_t>> created_tables;
+	for (auto &row : *created) {
+		auto table_id = row.GetValue<idx_t>(0);
+		auto table_schema_version = row.GetValue<idx_t>(1);
+		created_tables.emplace_back(table_id, table_schema_version);
+		stats.table_count++;
+		stats.max_table_id = MaxValue<idx_t>(stats.max_table_id, table_id);
+		stats.max_table_schema_version = MaxValue<idx_t>(stats.max_table_schema_version, table_schema_version);
+	}
+	if (created_tables.empty()) {
+		return stats;
+	}
+
+	auto copy_tables = manager.Execute(StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_table(
+    table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative, branch_id)
+SELECT table_id, table_uuid, %llu, NULL, schema_id, table_name, path, path_is_relative, %llu
+FROM {METADATA_CATALOG}.ducklake_table
+WHERE branch_id = %llu AND begin_snapshot = %llu;
+
+INSERT INTO {METADATA_CATALOG}.ducklake_column(
+    column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type,
+    initial_default, default_value, nulls_allowed, parent_column, default_value_type,
+    default_value_dialect, branch_id)
+SELECT column_id, %llu, NULL, table_id, column_order, column_name, column_type,
+       initial_default, default_value, nulls_allowed, parent_column, default_value_type,
+       default_value_dialect, %llu
+FROM {METADATA_CATALOG}.ducklake_column
+WHERE branch_id = %llu AND begin_snapshot = %llu;
+
+INSERT INTO {METADATA_CATALOG}.ducklake_table_stats(table_id, record_count, next_row_id, file_size_bytes, branch_id)
+SELECT t.table_id, 0, 0, 0, %llu
+FROM {METADATA_CATALOG}.ducklake_table t
+WHERE t.branch_id = %llu AND t.begin_snapshot = %llu
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_stats stats
+    WHERE stats.table_id = t.table_id AND stats.branch_id = %llu
+  );
+
+INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats(
+    table_id, column_id, contains_null, contains_nan, min_value, max_value, extra_stats, branch_id)
+SELECT c.table_id, c.column_id, NULL, NULL, NULL, NULL, NULL, %llu
+FROM {METADATA_CATALOG}.ducklake_column c
+WHERE c.branch_id = %llu AND c.begin_snapshot = %llu
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_column_stats stats
+    WHERE stats.table_id = c.table_id AND stats.column_id = c.column_id AND stats.branch_id = %llu
+  );
+)",
+	                                                      new_head, target_ref.ref_id, source_ref.ref_id, picked_id,
+	                                                      new_head, target_ref.ref_id, source_ref.ref_id, picked_id,
+	                                                      target_ref.ref_id, source_ref.ref_id, picked_id,
+	                                                      target_ref.ref_id, target_ref.ref_id, source_ref.ref_id,
+	                                                      picked_id, target_ref.ref_id));
+	if (copy_tables->HasError()) {
+		copy_tables->GetErrorObject().Throw(StringUtil::Format("Failed to copy %s created tables: ", operation));
+	}
+
+	for (auto &entry : created_tables) {
+		auto table_id = entry.first;
+		auto table_schema_version = entry.second;
+		auto schema_versions = manager.Execute(StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_schema_versions(begin_snapshot, schema_version, table_id, branch_id)
+SELECT %llu, %llu, %llu, %llu
+WHERE NOT EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_schema_versions sv
+  WHERE sv.table_id = %llu AND sv.schema_version = %llu AND sv.branch_id = %llu
+);
+)",
+		                                                          new_head, table_schema_version, table_id,
+		                                                          target_ref.ref_id, table_id, table_schema_version,
+		                                                          target_ref.ref_id));
+		if (schema_versions->HasError()) {
+			schema_versions->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to copy %s schema_versions: ", operation));
+		}
+
+		auto regs = manager.Query(StringUtil::Format(R"(
+SELECT table_name, schema_version
+FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+WHERE table_id = %llu AND branch_id = %llu AND schema_version = %llu
+)",
+		                                             table_id, source_ref.ref_id, table_schema_version));
+		if (regs->HasError()) {
+			regs->GetErrorObject().Throw(StringUtil::Format("Failed to read %s inlined registrations: ", operation));
+		}
+		bool registered = false;
+		for (auto &reg_row : *regs) {
+			registered = true;
+			auto source_name = reg_row.GetValue<string>(0);
+			auto schema_version = reg_row.GetValue<idx_t>(1);
+			string target_name =
+			    shared_layout ? source_name
+			                  : DuckLakeMetadataManager::InlinedTableNameFor(table_id, schema_version, target_ref.ref_id,
+			                                                                false);
+			auto ensure = manager.Execute(StringUtil::Format(R"(
+CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s AS
+SELECT * FROM {METADATA_CATALOG}.%s WHERE 1 = 0;
+INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, schema_version, branch_id)
+SELECT %llu, %s, %llu, %llu
+WHERE NOT EXISTS (
+  SELECT 1 FROM {METADATA_CATALOG}.ducklake_inlined_data_tables
+  WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu
+);
+)",
+			                                                 SQLIdentifier(target_name), SQLIdentifier(source_name),
+			                                                 table_id, SQLString(target_name), schema_version,
+			                                                 target_ref.ref_id, table_id, schema_version,
+			                                                 target_ref.ref_id));
+			if (ensure->HasError()) {
+				ensure->GetErrorObject().Throw(
+				    StringUtil::Format("Failed to register %s inlined table: ", operation));
+			}
+		}
+		if (!registered) {
+			// No inlined registration on source (e.g. DATA_INLINING_ROW_LIMIT 0) — nothing else to copy.
+			continue;
+		}
+		(void)registered;
+	}
+
+	return stats;
+}
+
 static CherryPickApplyResult ApplyCherryPickSnapshot(DuckLakeMetadataManager &manager,
                                                      const DuckLakeRefInfo &source_ref,
                                                      const DuckLakeRefInfo &target_ref,
@@ -2043,6 +2319,12 @@ SELECT
 		new_head = row.GetValue<idx_t>(0);
 	}
 
+	idx_t new_schema_version = target_snapshot.schema_version;
+	idx_t new_next_catalog_id = target_snapshot.next_catalog_id;
+	if (HasCreatedTables(source_delta)) {
+		new_schema_version = target_snapshot.schema_version + 1;
+	}
+
 	auto insert_snapshot = manager.Execute(StringUtil::Format(
 	    R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot
@@ -2050,10 +2332,30 @@ VALUES (%llu, NOW(), %llu, %llu, %llu, %llu);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes
 VALUES (%llu, %s, NULL, %s, %s);
 )",
-	    new_head, target_snapshot.schema_version, target_snapshot.next_catalog_id, new_next_file_id, target_ref.ref_id,
-	    new_head, SQLString(picked.change_info.changes_made), SQLString(commit_message), SQLString(extra)));
+	    new_head, new_schema_version, new_next_catalog_id, new_next_file_id, target_ref.ref_id, new_head,
+	    SQLString(picked.change_info.changes_made), SQLString(commit_message), SQLString(extra)));
 	if (insert_snapshot->HasError()) {
 		insert_snapshot->GetErrorObject().Throw(StringUtil::Format("Failed to insert DuckLake %s snapshot: ", operation));
+	}
+
+	if (HasCreatedTables(source_delta)) {
+		auto created_stats = ApplyCherryPickCreatedTables(manager, source_ref, target_ref, picked.id, new_head,
+		                                                  shared_layout, operation);
+		if (created_stats.table_count > 0) {
+			new_schema_version =
+			    MaxValue<idx_t>(new_schema_version, created_stats.max_table_schema_version);
+			new_next_catalog_id = MaxValue<idx_t>(new_next_catalog_id, created_stats.max_table_id + 1);
+			auto bump = manager.Execute(StringUtil::Format(R"(
+UPDATE {METADATA_CATALOG}.ducklake_snapshot
+SET schema_version = %llu, next_catalog_id = %llu
+WHERE snapshot_id = %llu;
+)",
+			                                               new_schema_version, new_next_catalog_id, new_head));
+			if (bump->HasError()) {
+				bump->GetErrorObject().Throw(
+				    StringUtil::Format("Failed to bump DuckLake %s schema catalog ids: ", operation));
+			}
+		}
 	}
 
 	auto apply_sql = StringUtil::Format(
@@ -2306,8 +2608,8 @@ WHERE table_id = %llu AND branch_id = %llu;
 
 	CherryPickApplyResult result;
 	result.snapshot.snapshot_id = new_head;
-	result.snapshot.schema_version = target_snapshot.schema_version;
-	result.snapshot.next_catalog_id = target_snapshot.next_catalog_id;
+	result.snapshot.schema_version = new_schema_version;
+	result.snapshot.next_catalog_id = new_next_catalog_id;
 	result.snapshot.next_file_id = new_next_file_id;
 	result.snapshot.branch_id = target_ref.ref_id;
 	result.data_file_count = data_file_count;
@@ -2430,8 +2732,8 @@ DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &sourc
 	auto unsupported = CherryPickUnsupportedReason(source_delta);
 	if (!unsupported.empty()) {
 		throw NotImplementedException(
-		    "ducklake_cherry_pick currently supports DML inserts/deletes (data-file and inlined) only; "
-		    "snapshot %llu contains %s",
+		    "ducklake_cherry_pick currently supports DML inserts/deletes (data-file and inlined) and CREATE TABLE "
+		    "only; snapshot %llu contains %s",
 		    snapshot_id, unsupported);
 	}
 
@@ -2452,8 +2754,11 @@ DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &sourc
 	auto target_snapshot = ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "cherry-pick",
 	                                           "target head");
 	set<idx_t> source_data_files_created_by_range;
+	set<idx_t> source_tables_created_by_range;
+	ValidateCherryPickCreatedTables(*this, source_ref, target_ref, target_snapshot, snapshot_id, source_delta,
+	                                "cherry-pick");
 	ValidateCherryPickDependencies(*this, source_ref, target_ref, target_snapshot, snapshot_id, source_delta,
-	                               "cherry-pick", source_data_files_created_by_range);
+	                               "cherry-pick", source_data_files_created_by_range, source_tables_created_by_range);
 
 	result.messages.push_back(StringUtil::Format("Cherry-pick snapshot: %llu", snapshot_id));
 	result.messages.push_back(StringUtil::Format("Source branch: %s", source_ref.ref_name));
@@ -2544,8 +2849,8 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 		auto unsupported_snapshot = CherryPickUnsupportedReason(parsed);
 		if (!unsupported_snapshot.empty()) {
 			throw NotImplementedException(
-			    "ducklake_transplant currently supports DML inserts/deletes (data-file and inlined) only; "
-			    "snapshot %llu contains %s",
+			    "ducklake_transplant currently supports DML inserts/deletes (data-file and inlined) and CREATE TABLE "
+			    "only; snapshot %llu contains %s",
 			    snapshot.id, unsupported_snapshot);
 		}
 		MergeSnapshotChangeInformation(source_delta, parsed);
@@ -2554,8 +2859,8 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 	auto unsupported = CherryPickUnsupportedReason(source_delta);
 	if (!unsupported.empty()) {
 		throw NotImplementedException(
-		    "ducklake_transplant currently supports DML inserts/deletes (data-file and inlined) only; "
-		    "range [%llu, %llu] contains %s",
+		    "ducklake_transplant currently supports DML inserts/deletes (data-file and inlined) and CREATE TABLE "
+		    "only; range [%llu, %llu] contains %s",
 		    start_snapshot, end_snapshot, unsupported);
 	}
 
@@ -2578,10 +2883,15 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 	auto target_snapshot = ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "transplant",
 	                                           "target head");
 	set<idx_t> source_data_files_created_by_range;
+	set<idx_t> source_tables_created_by_range;
 	for (idx_t i = 0; i < picked_snapshots.size(); i++) {
+		ValidateCherryPickCreatedTables(*this, source_ref, target_ref, target_snapshot, picked_snapshots[i].id,
+		                                snapshot_deltas[i], "transplant");
 		ValidateCherryPickDependencies(*this, source_ref, target_ref, target_snapshot, picked_snapshots[i].id,
-		                               snapshot_deltas[i], "transplant", source_data_files_created_by_range);
+		                               snapshot_deltas[i], "transplant", source_data_files_created_by_range,
+		                               source_tables_created_by_range);
 		AddSourceDataFilesCreatedAt(*this, source_ref, picked_snapshots[i].id, source_data_files_created_by_range);
+		AddSourceTablesCreatedAt(*this, source_ref, picked_snapshots[i].id, source_tables_created_by_range);
 	}
 
 	result.messages.push_back(StringUtil::Format("Transplant range: %llu..%llu", start_snapshot, end_snapshot));
