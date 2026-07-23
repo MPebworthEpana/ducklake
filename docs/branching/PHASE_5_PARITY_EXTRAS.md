@@ -69,6 +69,7 @@ single snapshot's change set; diff shares the change-set computation).
    columns in `ducklake_snapshots()`.
 6. **T6 — Docs**: a user-facing "Branching in DuckLake" guide consolidating P1–P5 usage
    (create/use/merge/tag/diff/expire), suitable for the ducklake.select docs site.
+   **Shipped:** [`docs/guides/branching.md`](../guides/branching.md).
 
 ## Testing strategy
 

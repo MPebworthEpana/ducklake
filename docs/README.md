@@ -96,6 +96,11 @@ FROM my_ducklake.table_changes('my_table', 2, 2);
 
 See the [Usage](https://ducklake.select/docs/stable/duckdb/introduction) guide for more information.
 
+### Branching
+
+DuckLake supports git-like branches and tags (create/use/merge/diff/cherry-pick,
+ref history, and branch-aware retention). See **[Branching in DuckLake](guides/branching.md)**.
+
 ## Building & Loading the Extension
 
 To build, type
