@@ -175,6 +175,12 @@ Conflicts fail closed with a clear message. Fix one side, or use
 Optional: `merge_tombstone_mode` selects how inherited deletes are recorded on
 merge (`convert_end_snapshot` default, or `reown_tombstone`).
 
+`convert_end_snapshot` end-dates the live object on the target and drops the
+source tombstone. If another live **sibling** branch still needs that object,
+convert **fails closed** (including under `dry_run := true`, which reports
+`merge_type = conflicts` with a “break sibling” message). Use
+`reown_tombstone`, or merge/drop the sibling first, then convert.
+
 After a successful merge, the source branch typically owns no exclusive
 snapshots and can be dropped:
 
@@ -182,6 +188,14 @@ snapshots and can be dropped:
 CALL drop_branch('dev');
 ```
 
+### Admin options
+
+`merge_tombstone_mode` and `inlining_layout` / `convert_inlining_layout` are
+**catalog-global operator controls**. DuckLake does not enforce a privilege
+model for them in-engine: anyone who can run SQL against the catalog can set
+them. Protect them via metadata database permissions (who can connect / run
+`set_option` / `convert_inlining_layout`). Prefer documenting this policy for
+now rather than inventing an in-engine ACL.
 ---
 
 ## Diff and change review
@@ -349,10 +363,16 @@ Attach options: `BRANCH 'name'`, `AUTOMATIC_MIGRATION TRUE`.
 
 - **Rebase** (rewrite a branch onto a new base) is not a first-class command;
   transplant + careful ref management can approximate it later.
-- **Cherry-pick/transplant** currently support DML file-level inserts/deletes only.
+- **Cherry-pick/transplant** support DML inserts/deletes (data-file and inlined);
+  DDL, flushed-inlined, and compaction snapshots are not supported yet.
 - **Per-ref access control** is left to the metadata database / permissions layer.
 - Unbranched catalogs remain fully supported; branching features activate with
   the `1.1-dev*` metadata migrations above.
+
+> **Live docs.** Publishing this guide on [ducklake.select](https://ducklake.select)
+> is tracked via the **Needs Documentation** / `ducklake-web` workflow
+> (`.github/workflows/NeedsDocumentation.yml`). The in-repo file remains the
+> editable source until that port lands.
 
 For design background and the Nessie parity map, see
 [`GIT_LIKE_BRANCHING_FEATURES.md`](../GIT_LIKE_BRANCHING_FEATURES.md).

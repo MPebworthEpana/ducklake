@@ -1,0 +1,150 @@
+# name: test/sql/branching/tombstones/sibling_convert_fail_closed.test
+# description: F4.2 — convert_end_snapshot fails closed when a sibling still needs the object
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_sibling_convert', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.shared(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.shared VALUES (1);
+
+# Two siblings forked from the same main tip
+statement ok
+CALL ducklake.create_branch('a')
+
+statement ok
+CALL ducklake.create_branch('b')
+
+# Branch a drops the inherited table (creates a tombstone)
+statement ok
+CALL ducklake.use_branch('a')
+
+statement ok
+DROP TABLE ducklake.shared
+
+statement error
+SELECT * FROM ducklake.shared
+----
+shared
+
+# Sibling b still needs the table
+statement ok
+CALL ducklake.use_branch('b')
+
+query I
+SELECT i FROM ducklake.shared ORDER BY i
+----
+1
+
+# dry_run convert surfaces sibling break as conflicts (no metadata mutation)
+query I
+SELECT DISTINCT merge_type
+FROM ducklake.merge_branch('a', target := 'main', merge_tombstone_mode := 'convert_end_snapshot', dry_run := true)
+----
+conflicts
+
+query I
+SELECT CASE WHEN message LIKE '%break sibling%' THEN 1 ELSE 0 END
+FROM ducklake.merge_branch('a', target := 'main', merge_tombstone_mode := 'convert_end_snapshot', dry_run := true)
+LIMIT 1
+----
+1
+
+# Applying convert mode fails closed with the sibling visibility message
+statement error
+CALL ducklake.merge_branch('a', target := 'main', merge_tombstone_mode := 'convert_end_snapshot')
+----
+break sibling
+
+# Parent and sibling still intact after failed convert
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.shared ORDER BY i
+----
+1
+
+statement ok
+CALL ducklake.use_branch('b')
+
+query I
+SELECT i FROM ducklake.shared ORDER BY i
+----
+1
+
+# reown_tombstone succeeds while sibling b is still live
+statement ok
+CALL ducklake.merge_branch('a', target := 'main', merge_tombstone_mode := 'reown_tombstone')
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement error
+SELECT * FROM ducklake.shared
+----
+shared
+
+# Sibling b still sees the table (tombstone re-owned onto main; convert did not end-date)
+statement ok
+CALL ducklake.use_branch('b')
+
+query I
+SELECT i FROM ducklake.shared ORDER BY i
+----
+1
+
+# Second catalog: convert succeeds after the sibling is dropped
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/{UUID}_drop_sib.db' AS dl2 (DATA_PATH '{DATA_PATH}/ducklake_sibling_convert_drop', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE dl2.t(i INTEGER);
+
+statement ok
+INSERT INTO dl2.t VALUES (9);
+
+statement ok
+CALL dl2.create_branch('a')
+
+statement ok
+CALL dl2.create_branch('b')
+
+statement ok
+CALL dl2.use_branch('a')
+
+statement ok
+DROP TABLE dl2.t
+
+statement error
+CALL dl2.merge_branch('a', target := 'main', merge_tombstone_mode := 'convert_end_snapshot')
+----
+break sibling
+
+statement ok
+CALL dl2.use_branch('main')
+
+statement ok
+CALL dl2.drop_branch('b')
+
+statement ok
+CALL dl2.merge_branch('a', target := 'main', merge_tombstone_mode := 'convert_end_snapshot')
+
+statement ok
+CALL dl2.use_branch('main')
+
+statement error
+SELECT * FROM dl2.t
+----
+t

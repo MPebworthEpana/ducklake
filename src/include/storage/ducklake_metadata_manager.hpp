@@ -553,6 +553,8 @@ private:
 	                        bool enforce_branch_ownership = true);
 	//! SQL to re-own non-tombstone source metadata onto the target branch.
 	static string BuildReownNonTombstoneSQL(idx_t source_branch_id, idx_t target_branch_id);
+	//! Fail-closed probes: convert would break another live sibling's visibility of inherited objects.
+	static string BuildConvertTombstoneSiblingProbeSQL(idx_t source_branch_id, idx_t target_branch_id);
 	//! Convert source tombstones into target end_snapshot + delete tombstone rows (default merge mode).
 	static string BuildConvertTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id, idx_t merge_snapshot);
 	//! Re-own source tombstone rows onto the target branch.

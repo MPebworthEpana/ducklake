@@ -177,6 +177,10 @@ on the [ducklake.select](https://ducklake.select) docs site (Guides / Advanced F
 - Examples match macros shipped on `main`.
 - No stale “DML-only cherry-pick” wording once F1 slices land (update in lockstep).
 
+**Prep note.** In-repo guide points operators at the Needs Documentation /
+`ducklake-web` publish path; cherry-pick limitations already match F1.1 (inlined DML
+supported; DDL/compaction still not).
+
 ### Risks
 
 - Dual sources of truth (repo vs website) drifting — pick a canonical home and link the
@@ -260,6 +264,8 @@ does not enforce a dedicated admin privilege model.
 a soft attach/option gate if operators ask for in-engine enforcement. Avoid inventing a
 full ACL system (explicit P5 non-goal).
 
+**Status.** Document-only policy recorded in
+[`guides/branching.md`](../guides/branching.md) (Merge → Admin options).
 ### F4.2 — Sibling conflict under `convert_end_snapshot`
 
 **Problem.** Convert mode can break another live sibling branch’s visibility; merge SQL
@@ -274,6 +280,11 @@ rule is complete and tested.
    `reown_tombstone` (or merging/dropping the sibling first) succeeds.
 3. Ensure `dry_run` surfaces the same conflict without mutating metadata.
 4. Document the operator choices in the user guide’s merge section.
+
+**Status.** Covered by `test/sql/branching/tombstones/sibling_convert_fail_closed.test`
+(dry_run → `conflicts` / “break sibling”; apply convert fails closed; `reown_tombstone`
+and drop-sibling-then-convert succeed). Operator notes in
+[`guides/branching.md`](../guides/branching.md) merge section.
 
 ### F4.3 — Optional: tombstone vacuum / schedule context (deferrable)
 

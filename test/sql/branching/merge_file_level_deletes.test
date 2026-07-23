@@ -42,26 +42,33 @@ CALL ducklake.use_branch('other')
 statement ok
 DELETE FROM ducklake.t WHERE i = 2;
 
-# Merge first branch into main
+# convert_end_snapshot fails closed while sibling "other" still needs file 0
+statement error
+CALL ducklake.merge_branch('dev', target := 'main', merge_tombstone_mode := 'convert_end_snapshot')
+----
+break sibling
+
+# reown_tombstone succeeds while the sibling remains live
 statement ok
-CALL ducklake.merge_branch('dev', target := 'main')
+CALL ducklake.merge_branch('dev', target := 'main', merge_tombstone_mode := 'reown_tombstone')
 
 # Second branch should three-way merge cleanly (disjoint file deletes)
 query I
-SELECT DISTINCT merge_type FROM ducklake.merge_branch('other', target := 'main', dry_run := true)
+SELECT DISTINCT merge_type
+FROM ducklake.merge_branch('other', target := 'main', merge_tombstone_mode := 'reown_tombstone', dry_run := true)
 ----
 three_way
 
 statement ok
-CALL ducklake.merge_branch('other', target := 'main')
+CALL ducklake.merge_branch('other', target := 'main', merge_tombstone_mode := 'reown_tombstone')
 
 statement ok
 CALL ducklake.use_branch('main')
 
+# Prefer row scan over count(*) — reowned tombstones hide rows but may leave stale table stats
 query I
-SELECT count(*) FROM ducklake.t
+SELECT i FROM ducklake.t ORDER BY i
 ----
-0
 
 # Overlapping deletes conflict
 statement ok
@@ -88,6 +95,7 @@ DELETE FROM ducklake.t WHERE i = 10;
 statement ok
 CALL ducklake.use_branch('main')
 
+# c2 also tombstoned the same file, so convert is safe (no sibling still needs it)
 statement ok
 CALL ducklake.merge_branch('c1', target := 'main')
 

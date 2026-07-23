@@ -83,10 +83,24 @@ SELECT i FROM ducklake.t ORDER BY i
 1
 2
 
-# Shared-table layout keeps one physical inlined table; both branches have rows
+# Shared-table layout: both branches still see their rows after the pick
+# (portable — avoids DuckDB-specific __ducklake_metadata_* schema names)
+statement ok
+CALL ducklake.use_branch('dev')
+
 query I
-SELECT COUNT(DISTINCT branch_id) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1
+SELECT i FROM ducklake.t ORDER BY i
 ----
+1
+2
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
 2
 
 query I

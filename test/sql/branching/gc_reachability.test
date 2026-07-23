@@ -35,10 +35,16 @@ CALL ducklake.use_branch('main')
 statement ok
 CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true)
 
+statement ok
+CALL ducklake.use_branch('dev')
+
 query I
-SELECT count(*) FROM ducklake.t AT (BRANCH => 'dev')
+SELECT count(*) FROM ducklake.t
 ----
 2
+
+statement ok
+CALL ducklake.use_branch('main')
 
 # After dropping the unmerged branch, cleanup may reclaim branch-only files
 statement ok

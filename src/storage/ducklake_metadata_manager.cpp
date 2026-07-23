@@ -1172,27 +1172,33 @@ string DuckLakeMetadataManager::BuildReownTombstonesSQL(idx_t source_branch_id, 
 	return sql;
 }
 
-string DuckLakeMetadataManager::BuildConvertTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id,
-                                                          idx_t merge_snapshot) {
-	// Map deletion table -> (live metadata table, object id match expression on `live`)
-	struct Kind {
-		const char *deletion;
-		const char *live;
-		const char *live_match_expr; // SQL expr using alias `live`
-	};
-	const Kind kinds[] = {
-	    {"ducklake_deletion_schema", "ducklake_schema", "live.schema_id"},
-	    {"ducklake_deletion_table", "ducklake_table", "live.table_id"},
-	    {"ducklake_deletion_view", "ducklake_view", "live.view_id"},
-	    {"ducklake_deletion_column", "ducklake_column", "((live.table_id::BIGINT * 4294967296) + live.column_id)"},
-	    {"ducklake_deletion_data_file", "ducklake_data_file", "live.data_file_id"},
-	    {"ducklake_deletion_delete_file", "ducklake_delete_file", "live.delete_file_id"},
-	    {"ducklake_deletion_macro", "ducklake_macro", "live.macro_id"},
-	    {"ducklake_deletion_partition", "ducklake_partition_info", "live.partition_id"},
-	};
+namespace {
+
+struct ConvertTombstoneKind {
+	const char *deletion;
+	const char *live;
+	const char *live_match_expr; // SQL expr using alias `live`
+};
+
+static const ConvertTombstoneKind CONVERT_TOMBSTONE_KINDS[] = {
+    {"ducklake_deletion_schema", "ducklake_schema", "live.schema_id"},
+    {"ducklake_deletion_table", "ducklake_table", "live.table_id"},
+    {"ducklake_deletion_view", "ducklake_view", "live.view_id"},
+    {"ducklake_deletion_column", "ducklake_column", "((live.table_id::BIGINT * 4294967296) + live.column_id)"},
+    {"ducklake_deletion_data_file", "ducklake_data_file", "live.data_file_id"},
+    {"ducklake_deletion_delete_file", "ducklake_delete_file", "live.delete_file_id"},
+    {"ducklake_deletion_macro", "ducklake_macro", "live.macro_id"},
+    {"ducklake_deletion_partition", "ducklake_partition_info", "live.partition_id"},
+};
+
+} // namespace
+
+string DuckLakeMetadataManager::BuildConvertTombstoneSiblingProbeSQL(idx_t source_branch_id, idx_t target_branch_id) {
 	string sql;
-	// Fail closed if convert would end-date an object still required by another live branch's lineage.
-	for (auto &kind : kinds) {
+	// Fail closed if convert would end-date an object still visible to another live branch.
+	// Lineage-capped AT reads may still see an end-dated row historically, but end-dating the
+	// shared live row is unsafe while a sibling (or other active branch) still depends on it.
+	for (auto &kind : CONVERT_TOMBSTONE_KINDS) {
 		sql += StringUtil::Format(R"(
 SELECT error('merge_tombstone_mode=convert_end_snapshot would break sibling branch visibility for %s object ' ||
              CAST(del.object_id AS VARCHAR) ||
@@ -1203,27 +1209,34 @@ WHERE del.branch_id = %llu
     SELECT 1 FROM {METADATA_CATALOG}.%s live
     WHERE %s = del.object_id AND live.end_snapshot IS NULL
       AND (live.branch_id = %llu OR live.branch_id = del.ancestor_branch_id)
-  )
-  AND EXISTS (
-    SELECT 1
-    FROM {METADATA_CATALOG}.ducklake_ref r
-    JOIN {METADATA_CATALOG}.ducklake_branch_lineage bl
-      ON bl.branch_id = r.ref_id AND bl.ancestor_branch_id = del.ancestor_branch_id
-    WHERE r.ref_type = 'branch' AND r.status = 'active'
-      AND r.ref_id NOT IN (%llu, %llu)
-      AND bl.max_visible_snapshot >= del.deleted_at_snapshot
-      AND NOT EXISTS (
-        SELECT 1 FROM {METADATA_CATALOG}.%s sib_del
-        WHERE sib_del.branch_id = r.ref_id
-          AND sib_del.ancestor_branch_id = del.ancestor_branch_id
-          AND sib_del.object_id = del.object_id
+      AND EXISTS (
+        SELECT 1
+        FROM {METADATA_CATALOG}.ducklake_ref r
+        JOIN {METADATA_CATALOG}.ducklake_branch_lineage bl
+          ON bl.branch_id = r.ref_id AND bl.ancestor_branch_id = live.branch_id
+        WHERE r.ref_type = 'branch' AND r.status = 'active'
+          AND r.ref_id NOT IN (%llu, %llu)
+          AND live.begin_snapshot <= LEAST(r.snapshot_id, bl.max_visible_snapshot)
+          AND NOT EXISTS (
+            SELECT 1 FROM {METADATA_CATALOG}.%s sib_del
+            WHERE sib_del.branch_id = r.ref_id
+              AND sib_del.ancestor_branch_id = live.branch_id
+              AND sib_del.object_id = del.object_id
+              AND sib_del.deleted_at_snapshot <= r.snapshot_id
+          )
       )
   );
 )",
 		                          kind.live, kind.deletion, source_branch_id, kind.live, kind.live_match_expr,
 		                          target_branch_id, source_branch_id, target_branch_id, kind.deletion);
 	}
-	for (auto &kind : kinds) {
+	return sql;
+}
+
+string DuckLakeMetadataManager::BuildConvertTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id,
+                                                          idx_t merge_snapshot) {
+	string sql = BuildConvertTombstoneSiblingProbeSQL(source_branch_id, target_branch_id);
+	for (auto &kind : CONVERT_TOMBSTONE_KINDS) {
 		// End-date live target/ancestor rows covered by source tombstones, then drop those tombstones.
 		sql += StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.%s live
@@ -1383,6 +1396,17 @@ DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &sou
 
 	if (dry_run) {
 		result.new_target_head = fast_forward ? result.source_head : result.target_head;
+		// Probe convert sibling safety without mutating metadata (same checks as apply).
+		if (tombstone_mode == "convert_end_snapshot") {
+			auto probe =
+			    Execute(BuildConvertTombstoneSiblingProbeSQL(source_ref.ref_id, target_ref.ref_id));
+			if (probe->HasError()) {
+				result.merge_type = "conflicts";
+				result.messages.clear();
+				result.messages.push_back(probe->GetError());
+				return result;
+			}
+		}
 		result.messages.push_back("dry_run=true — no metadata changes applied");
 		return result;
 	}
