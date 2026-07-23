@@ -1,5 +1,9 @@
 # Git-like Branching for DuckLake — Phased Implementation Plans
 
+> **Users:** looking for how to *use* branches, tags, merge, diff, and
+> cherry-pick? Start with the guide:
+> **[Branching in DuckLake](../guides/branching.md)**.
+
 This directory contains per-phase implementation plans for adding git-like branching to
 DuckLake, derived from the feature catalog in
 [`docs/GIT_LIKE_BRANCHING_FEATURES.md`](../GIT_LIKE_BRANCHING_FEATURES.md) (which in turn
