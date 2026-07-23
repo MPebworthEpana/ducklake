@@ -1,5 +1,13 @@
 # Git-like Branching for DuckLake — Phased Implementation Plans
 
+> **Users:** looking for how to *use* branches, tags, merge, diff, and
+> cherry-pick? Start with the guide:
+> **[Branching in DuckLake](../guides/branching.md)**.
+>
+> **Post–Phase 5 follow-ups:** see
+> **[NEAR_TERM_FOLLOWUPS.md](NEAR_TERM_FOLLOWUPS.md)** (broader cherry-pick,
+> docs site publish, catalog-backend CI, hardening leftovers).
+
 This directory contains per-phase implementation plans for adding git-like branching to
 DuckLake, derived from the feature catalog in
 [`docs/GIT_LIKE_BRANCHING_FEATURES.md`](../GIT_LIKE_BRANCHING_FEATURES.md) (which in turn
@@ -20,6 +28,7 @@ compatible, and gates its metadata changes behind a spec-version bump using the 
 | P3 | [PHASE_3_FAST_FORWARD_MERGE_AND_GC.md](PHASE_3_FAST_FORWARD_MERGE_AND_GC.md) | Fast-forward merge; fully branch-aware garbage collection; branch drop | F9 (FF), F11 (full), F12 (partial) | Medium | P2 |
 | P4 | [PHASE_4_THREE_WAY_MERGE.md](PHASE_4_THREE_WAY_MERGE.md) | Three-way merge with DuckLake-semantic conflict detection | F9 (3-way) | High | P3 |
 | P5 | [PHASE_5_PARITY_EXTRAS.md](PHASE_5_PARITY_EXTRAS.md) | Cherry-pick/transplant, catalog-level diff between refs, ref history | F9 (cherry-pick), F12 (full) | Medium | P4 |
+| Post-P5 | [NEAR_TERM_FOLLOWUPS.md](NEAR_TERM_FOLLOWUPS.md) | Broader cherry-pick/transplant, docs site publish, PG/SQLite branching CI, hardening leftovers | — | Mixed | P5 + H1–H3 |
 
 **Hardening (before P5):** [HARDENING_P2_P4_GAPS.md](HARDENING_P2_P4_GAPS.md) —
 closes deferred gaps from P2–P4 (tombstones, reachability GC, OCC/`DetectConflicts`
