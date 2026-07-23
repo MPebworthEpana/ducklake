@@ -1,0 +1,168 @@
+# name: test/sql/branching/cherry_pick_create_table.test
+# description: F1.2 — cherry-pick / transplant CREATE TABLE (compose-clean DDL)
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_cherry_pick_create_table', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+CREATE TABLE ducklake.u(x INTEGER, y VARCHAR);
+
+statement ok
+INSERT INTO ducklake.u VALUES (10, 'a');
+
+statement ok
+INSERT INTO ducklake.u VALUES (20, 'b');
+
+# Snapshot 3 is CREATE TABLE; 4 and 5 are inserts
+query I
+SELECT CASE WHEN map_contains(changes, 'tables_created') THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = 3
+----
+1
+
+# dry_run accepts CREATE TABLE and does not advance main
+statement ok
+CREATE TEMP TABLE main_head_before AS
+SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main';
+
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main', dry_run := true)
+----
+cherry_pick
+
+query I
+SELECT CASE WHEN (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main') =
+                 (SELECT snapshot_id FROM main_head_before)
+            THEN 1 ELSE 0 END
+----
+1
+
+# Main does not yet see the branch-created table
+statement ok
+CALL ducklake.use_branch('main')
+
+statement error
+SELECT * FROM ducklake.u
+----
+does not exist
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+# Cherry-pick only the CREATE TABLE onto main
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main')
+----
+cherry_pick
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query II
+SELECT x, y FROM ducklake.u ORDER BY x
+----
+
+# Transplant the following inserts (depends on the table now visible on main)
+statement ok
+CALL ducklake.use_branch('dev')
+
+query II
+SELECT DISTINCT transplant_type, snapshots_applied
+FROM ducklake.transplant('dev', 4::UBIGINT, 5::UBIGINT, target := 'main')
+----
+transplant	2
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query II
+SELECT x, y FROM ducklake.u ORDER BY x
+----
+10	a
+20	b
+
+# Full-range transplant of CREATE + DML onto main from a fresh feature branch
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+statement ok
+CALL ducklake.create_branch('feature')
+
+statement ok
+CALL ducklake.use_branch('feature')
+
+statement ok
+CREATE TABLE ducklake.v(n INTEGER);
+
+statement ok
+INSERT INTO ducklake.v VALUES (7);
+
+statement ok
+CALL ducklake.use_branch('main')
+
+# feature CREATE/INSERT are snapshots 10 and 11 after the earlier picks
+query II
+SELECT DISTINCT transplant_type, snapshots_applied
+FROM ducklake.transplant('feature', 10::UBIGINT, 11::UBIGINT, target := 'main')
+----
+transplant	2
+
+query I
+SELECT n FROM ducklake.v ORDER BY n
+----
+7
+
+# Name conflict: target already has the table
+statement ok
+CALL ducklake.create_branch('conflict_dev')
+
+statement ok
+CALL ducklake.use_branch('conflict_dev')
+
+statement ok
+CREATE TABLE ducklake.w(z INTEGER);
+
+statement ok
+CALL ducklake.use_branch('main')
+
+statement ok
+CREATE TABLE ducklake.w(z INTEGER);
+
+# conflict_dev CREATE TABLE is snapshot 14 (after feature transplant wrote 12/13)
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('conflict_dev', 14::UBIGINT, target := 'main', dry_run := true)
+----
+conflicts
+
+statement error
+SELECT * FROM ducklake.cherry_pick('conflict_dev', 14::UBIGINT, target := 'main')
+----
+Cherry-pick conflict

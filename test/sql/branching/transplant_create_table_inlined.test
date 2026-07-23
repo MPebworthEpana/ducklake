@@ -1,0 +1,52 @@
+# name: test/sql/branching/transplant_create_table_inlined.test
+# description: F1.2 — transplant CREATE TABLE + inlined inserts
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# Default inlining enabled
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_transplant_create_inlined')
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+CREATE TABLE ducklake.u(x INTEGER);
+
+statement ok
+INSERT INTO ducklake.u VALUES (1), (2);
+
+query I
+SELECT CASE WHEN map_contains(changes, 'inlined_insert') THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = 3
+----
+1
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query II
+SELECT DISTINCT transplant_type, snapshots_applied
+FROM ducklake.transplant('dev', 2::UBIGINT, 3::UBIGINT, target := 'main')
+----
+transplant	2
+
+query I
+SELECT x FROM ducklake.u ORDER BY x
+----
+1
+2
