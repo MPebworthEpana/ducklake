@@ -100,3 +100,8 @@ single snapshot's change set; diff shares the change-set computation).
 - Reflog storage choice (versioned `ducklake_ref` vs log table) affects the P1 table's
   shape — flag early to keep P1's schema forward-compatible (P1 already reserves
   `parent_ref_id`; versioning columns can be added in this phase's migration).
+
+## Follow-ups
+
+Near-term product follow-ups after T1–T6 are planned in
+[`NEAR_TERM_FOLLOWUPS.md`](NEAR_TERM_FOLLOWUPS.md).
