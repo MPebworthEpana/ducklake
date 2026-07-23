@@ -1,0 +1,145 @@
+# name: test/sql/branching/cherry_pick_inlined.test
+# description: F1.1 — cherry-pick / transplant inlined DML (shared_table default)
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+# Default inlining enabled (do NOT set DATA_INLINING_ROW_LIMIT 0)
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_cherry_pick_inlined')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.t VALUES (1);
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (2);
+
+# Confirm the branch insert was inlined (not a parquet data file commit only)
+query I
+SELECT CASE WHEN map_contains(changes, 'inlined_insert') THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = 3
+----
+1
+
+# dry_run reports the pick and does not advance main
+statement ok
+CREATE TEMP TABLE main_head_before AS
+SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main';
+
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main', dry_run := true)
+----
+cherry_pick
+
+query I
+SELECT CASE WHEN (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main') =
+                 (SELECT snapshot_id FROM main_head_before)
+            THEN 1 ELSE 0 END
+----
+1
+
+# Main does not yet see the branch-only inlined row
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+# Apply the inlined insert onto main
+query I
+SELECT DISTINCT cherry_pick_type
+FROM ducklake.cherry_pick('dev', 3::UBIGINT, target := 'main')
+----
+cherry_pick
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+2
+
+# Shared-table layout keeps one physical inlined table; both branches have rows
+query I
+SELECT COUNT(DISTINCT branch_id) FROM __ducklake_metadata_ducklake.ducklake_inlined_data_1_1
+----
+2
+
+query I
+SELECT CASE WHEN commit_extra_info LIKE '%cherry_pick_source=dev%' AND
+                 commit_extra_info LIKE '%cherry_pick_snapshot=3%'
+            THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = (SELECT snapshot_id FROM ducklake.refs() WHERE ref_name = 'main')
+----
+1
+
+# Transplant a later inlined insert
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (3);
+
+query I
+SELECT DISTINCT transplant_type
+FROM ducklake.transplant('dev', 5::UBIGINT, 5::UBIGINT, target := 'main')
+----
+transplant
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT i FROM ducklake.t ORDER BY i
+----
+1
+2
+3
+
+# flushed_inlined remains unsupported
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.t VALUES (4);
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+# Snapshot 8 is the flush after insert-4 (see sequence above)
+query I
+SELECT CASE WHEN map_contains(changes, 'flushed_inlined') THEN 1 ELSE 0 END
+FROM ducklake.snapshots()
+WHERE snapshot_id = 8
+----
+1
+
+statement error
+SELECT * FROM ducklake.cherry_pick('dev', 8::UBIGINT, target := 'main')
+----
+flushed inlined-data
