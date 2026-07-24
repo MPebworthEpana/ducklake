@@ -194,10 +194,10 @@ compose-clean DDL supported; flushed-inlined/compaction still not). Publishing t
 ducklake.select page remains an out-of-repo `ducklake-web` change.
 
 **Status.** Port package shipped in-repo under [`docs/ducklake-web/`](../ducklake-web/README.md)
-(Jekyll-adapted `guides/branching.md`, menu patch, optional cross-link blurbs). A
-`duckdb/ducklake-web` issue tracks applying that package; the live site URL is not
-online until a maintainer merges the web PR (this agent cannot fork/push to
-`duckdb/ducklake-web`).
+(Jekyll-adapted `guides/branching.md`, menu patch, optional cross-link blurbs). Tracking
+issue: [duckdb/ducklake-web#391](https://github.com/duckdb/ducklake-web/issues/391). The live
+site URL is not online until a maintainer applies that package (this environment cannot
+fork/push to `duckdb/ducklake-web`).
 
 ### Risks
 
