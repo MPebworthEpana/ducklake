@@ -94,9 +94,11 @@ taxonomy already understands.
   drop table only if not referenced on target; conflict when target altered the same
   table.
 
-**Status (partial).** CREATE TABLE apply shipped (`ApplyCherryPickCreatedTables`) with
-tests `cherry_pick_create_table.test` and `transplant_create_table_inlined.test`. Still
-fail-closed for ALTER/DROP, views, macros, and CREATE SCHEMA.
+**Status.** Shipped: compose-clean DDL cherry-pick/transplant for CREATE/DROP
+SCHEMA/TABLE/VIEW/MACRO and ALTER TABLE column ADD/DROP/RENAME, plus rename-as-create
+rows for tables/views. Covered by `cherry_pick_create_table.test`,
+`cherry_pick_inlined.test`, and `cherry_pick_ddl.test`. Still fail-closed for
+flushed-inlined and compaction snapshots.
 
 #### F1.3 — Compaction snapshots (optional / later within F1)
 
@@ -188,8 +190,14 @@ on the [ducklake.select](https://ducklake.select) docs site (Guides / Advanced F
 
 **Prep note.** In-repo guide points operators at the Needs Documentation /
 `ducklake-web` publish path; cherry-pick limitations match F1.1–F1.2 (inlined DML +
-CREATE TABLE supported; other DDL/compaction still not). Publishing the live
+compose-clean DDL supported; flushed-inlined/compaction still not). Publishing the live
 ducklake.select page remains an out-of-repo `ducklake-web` change.
+
+**Status.** Port package shipped in-repo under [`docs/ducklake-web/`](../ducklake-web/README.md)
+(Jekyll-adapted `guides/branching.md`, menu patch, optional cross-link blurbs). Tracking
+issue: [duckdb/ducklake-web#391](https://github.com/duckdb/ducklake-web/issues/391). The live
+site URL is not online until a maintainer applies that package (this environment cannot
+fork/push to `duckdb/ducklake-web`).
 
 ### Risks
 
@@ -242,16 +250,24 @@ triage**, not inventing a new CI workflow from scratch.
 
 | Backend | How covered | Local note |
 |---|---|---|
-| DuckDB catalog | `unittest "test/sql/branching/*"` (+ refs) | Primary day-to-day signal |
-| SQLite catalog | `Catalogs.yml` → `test/configs/sqlite.json` + `test/sql/*` | Requires `ENABLE_SQLITE_SCANNER=ON` build |
-| Postgres catalog | `Catalogs.yml` → `test/configs/postgres.json` + `test/sql/*` | Requires `ENABLE_POSTGRES_SCANNER=ON` + Postgres service |
+| DuckDB catalog | `unittest "test/sql/branching/*"` (+ refs) | Primary day-to-day signal — **green** |
+| SQLite catalog | `test/configs/sqlite.json` + branching/refs | **green** (587 + 50 assertions); needs `ENABLE_SQLITE_SCANNER=ON` |
+| Postgres catalog | `test/configs/postgres.json` + branching/refs | **green** (597 + 50 assertions); needs `ENABLE_POSTGRES_SCANNER=ON` + Postgres |
 
-No branching/refs paths are presently listed under `skip_tests` in
-`test/configs/{sqlite,postgres}.json`. Portable tests avoid DuckDB-only
-`__ducklake_metadata_*` schema names where practical (e.g. cherry-pick inlined /
-CREATE TABLE suites). Full PG/SQLite matrix confirmation remains the CI
-`Catalogs.yml` job; local agent images without those scanners cannot re-run that
-matrix here.
+Local helper: `scripts/run_branching_catalog_matrix.sh` (set `BUILD=build/debug` or release).
+
+No branching/refs paths are listed under unjustified `skip_tests`. Catalog-specific smoke tests:
+
+- `test/sql/branching/sqlite_catalog_main_schema.test` (skipped on Postgres config)
+- `test/sql/branching/postgres_catalog_main_schema.test` (requires `DUCKLAKE_CI`; skipped on SQLite config)
+
+**Fixes landed with this matrix**
+
+1. **SQLite `branch_id` DEFAULT portability** — sqlite_scanner left `ADD COLUMN … DEFAULT 0` as NULL, so lineage visibility hid `main`. Fixed via explicit `branch_id=0` on init, MigrateV12 backfill, and catalog version **1.1-dev5** (`MigrateV14`) NULL→0 backfill; lineage predicates also `COALESCE(branch_id, 0)`.
+2. **Postgres commit placeholders** — `PostgresMetadataManager::ExecuteQuery` now runs `SubstituteSnapshotPlaceholders` (was dropping `{BRANCH_ID*}`).
+3. **Portable fail-closed raises** — DuckDB `error()` is not valid in native Postgres SQL; `{RAISE_ON_ROWS_*}` expands to `error()` for DuckDB execution and PL/pgSQL `RAISE` for `postgres_execute`.
+
+CI `Catalogs.yml` remains the full `test/sql/*` gate.
 
 ### Risks
 

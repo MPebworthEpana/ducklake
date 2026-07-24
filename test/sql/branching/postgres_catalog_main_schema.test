@@ -1,0 +1,50 @@
+# name: test/sql/branching/postgres_catalog_main_schema.test
+# description: F3 — Postgres catalog creates tables on main and supports branch isolation
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+require postgres_scanner
+
+# Catalogs.yml sets DUCKLAKE_CI=1; local matrix should export it too.
+require-env DUCKLAKE_CI
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:postgres:dbname=ducklakedb' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_postgres_main', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.base VALUES (1), (2);
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+2
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.base VALUES (3);
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+3
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+2

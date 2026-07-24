@@ -204,6 +204,11 @@ public:
 protected:
 	void SubstituteCatalogPlaceholders(string &query) const;
 	void SubstituteSnapshotPlaceholders(DuckLakeSnapshot snapshot, string &query) const;
+	//! Expand `{RAISE_ON_ROWS_BEGIN}`…`{RAISE_ON_ROWS_END}` wrappers.
+	//! `postgres_native` selects PL/pgSQL RAISE (SQL sent to Postgres) vs DuckDB `error()`.
+	void ExpandRaiseOnRowsPlaceholders(string &query, bool postgres_native) const;
+	//! Wrap a SELECT that returns VARCHAR `error_message` for fail-closed raises.
+	static string WrapRaiseOnRowsSQL(const string &row_select_sql);
 
 public:
 	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, `{BRANCH_STATS_FILTER}`, `{BRANCH_OWNED_FILTER}`,
@@ -337,8 +342,7 @@ public:
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version);
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id,
 	                                  bool shared_layout = false);
-	static string InlinedTableDdlSql(const string &table_name, const string &column_defs,
-	                                 bool shared_layout = false);
+	static string InlinedTableDdlSql(const string &table_name, const string &column_defs, bool shared_layout = false);
 	static string InlinedTableRegistrationTuple(idx_t table_id, const string &table_name, idx_t schema_version);
 	static string LatestInlinedTableQuery(idx_t table_id, bool shared_layout = false);
 	static string DropDataFiles(const set<DataFileIndex> &dropped_files);
@@ -430,6 +434,8 @@ public:
 	virtual void MigrateV12(bool allow_failures = false);
 	//! 1.1-dev3 → 1.1-dev4: append-only ref history log
 	virtual void MigrateV13(bool allow_failures = false);
+	//! 1.1-dev4 → 1.1-dev5: backfill NULL branch_id to 0 (SQLite/Postgres DEFAULT portability)
+	virtual void MigrateV14(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 
@@ -454,8 +460,8 @@ public:
 	virtual DuckLakeCherryPickResult CherryPick(const string &source_branch, idx_t snapshot_id,
 	                                            const string &target_branch, bool dry_run);
 	//! Phase 5: apply a source-owned snapshot range onto a target branch after one combined validation.
-	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot,
-	                                            idx_t end_snapshot, const string &target_branch, bool dry_run);
+	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot, idx_t end_snapshot,
+	                                            const string &target_branch, bool dry_run);
 	//! Phase 5: catalog-level diff between two refs.
 	virtual vector<DuckLakeDiffResult> DiffRefs(const string &ref_a, const string &ref_b);
 	virtual DuckLakeConvertInliningLayoutResult ConvertInliningLayout(const string &target_layout, bool dry_run);

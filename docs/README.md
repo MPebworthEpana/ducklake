@@ -101,6 +101,11 @@ See the [Usage](https://ducklake.select/docs/stable/duckdb/introduction) guide f
 DuckLake supports git-like branches and tags (create/use/merge/diff/cherry-pick,
 ref history, and branch-aware retention). See **[Branching in DuckLake](guides/branching.md)**.
 
+The ducklake.select port lives in [`docs/ducklake-web/`](ducklake-web/README.md)
+(Jekyll-adapted page + menu/cross-link patches for `duckdb/ducklake-web`).
+Intended live URL once published:
+[Branching](https://ducklake.select/docs/stable/duckdb/guides/branching).
+
 ## Building & Loading the Extension
 
 To build, type

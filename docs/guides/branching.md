@@ -238,19 +238,21 @@ Apply selected commits from one branch onto another without merging the whole
 branch.
 
 ```sql
--- Single snapshot (DML inserts/deletes: data-file and inlined; CREATE TABLE)
+-- Single snapshot (DML inserts/deletes: data-file and inlined; compose-clean DDL)
 FROM cherry_pick('feature', 42, target := 'main', dry_run := true);
 CALL cherry_pick('feature', 42, target := 'main');
 
--- Contiguous range (all-or-nothing), including CREATE TABLE then DML
+-- Contiguous range (all-or-nothing), including DDL dependencies then DML
 CALL transplant('feature', 40, 42, target := 'main');
 ```
 
 Current limitations (fail closed):
 
-- CREATE TABLE cherry-pick/transplant is supported (same `table_id` / UUID copied onto
-  the target when the object is new there). Other DDL (ALTER/DROP, views, macros,
-  schemas), flushed-inlined, and compaction snapshots are not supported yet.
+- Compose-clean DDL cherry-pick/transplant is supported for schemas, tables, views,
+  scalar/table macros, column ADD/DROP/RENAME, renames recorded as create+drop, and
+  drops. Name/dependency conflicts fail closed.
+- Flushed-inlined and compaction snapshots are not supported by cherry-pick/transplant
+  yet. Merge the branch or re-run compaction/flush on the target.
 - Inlined insert/delete cherry-pick and transplant are supported (shared_table default;
   per-branch layout is handled when present). Deletes of inherited inlined parent rows
   that were never remapped onto the target may not apply.
@@ -366,16 +368,16 @@ Attach options: `BRANCH 'name'`, `AUTOMATIC_MIGRATION TRUE`.
 - **Rebase** (rewrite a branch onto a new base) is not a first-class command;
   transplant + careful ref management can approximate it later.
 - **Cherry-pick/transplant** support DML inserts/deletes (data-file and inlined) and
-  CREATE TABLE; other DDL, flushed-inlined, and compaction snapshots are not
-  supported yet.
+  compose-clean DDL; flushed-inlined and compaction snapshots are not supported yet.
 - **Per-ref access control** is left to the metadata database / permissions layer.
 - Unbranched catalogs remain fully supported; branching features activate with
   the `1.1-dev*` metadata migrations above.
 
-> **Live docs.** Publishing this guide on [ducklake.select](https://ducklake.select)
-> is tracked via the **Needs Documentation** / `ducklake-web` workflow
-> (`.github/workflows/NeedsDocumentation.yml`). The in-repo file remains the
-> editable source until that port lands.
+> **Live docs.** The [ducklake.select](https://ducklake.select) port package is in
+> [`docs/ducklake-web/`](../ducklake-web/README.md) (Jekyll page + menu patches for
+> `duckdb/ducklake-web`). Intended URL:
+> [Branching](https://ducklake.select/docs/stable/duckdb/guides/branching).
+> This in-repo guide remains the editable source of truth until that PR merges.
 
 For design background and the Nessie parity map, see
 [`GIT_LIKE_BRANCHING_FEATURES.md`](../GIT_LIKE_BRANCHING_FEATURES.md).
