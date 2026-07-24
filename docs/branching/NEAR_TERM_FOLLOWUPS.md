@@ -244,16 +244,24 @@ triage**, not inventing a new CI workflow from scratch.
 
 | Backend | How covered | Local note |
 |---|---|---|
-| DuckDB catalog | `unittest "test/sql/branching/*"` (+ refs) | Primary day-to-day signal |
-| SQLite catalog | `Catalogs.yml` → `test/configs/sqlite.json` + `test/sql/*` | Requires `ENABLE_SQLITE_SCANNER=ON` build |
-| Postgres catalog | `Catalogs.yml` → `test/configs/postgres.json` + `test/sql/*` | Requires `ENABLE_POSTGRES_SCANNER=ON` + Postgres service |
+| DuckDB catalog | `unittest "test/sql/branching/*"` (+ refs) | Primary day-to-day signal — **green** |
+| SQLite catalog | `test/configs/sqlite.json` + branching/refs | **green** (587 + 50 assertions); needs `ENABLE_SQLITE_SCANNER=ON` |
+| Postgres catalog | `test/configs/postgres.json` + branching/refs | **green** (597 + 50 assertions); needs `ENABLE_POSTGRES_SCANNER=ON` + Postgres |
 
-No branching/refs paths are presently listed under `skip_tests` in
-`test/configs/{sqlite,postgres}.json`. Portable tests avoid DuckDB-only
-`__ducklake_metadata_*` schema names where practical (e.g. cherry-pick inlined /
-CREATE TABLE suites). Full PG/SQLite matrix confirmation remains the CI
-`Catalogs.yml` job; local agent images without those scanners cannot re-run that
-matrix here.
+Local helper: `scripts/run_branching_catalog_matrix.sh` (set `BUILD=build/debug` or release).
+
+No branching/refs paths are listed under unjustified `skip_tests`. Catalog-specific smoke tests:
+
+- `test/sql/branching/sqlite_catalog_main_schema.test` (skipped on Postgres config)
+- `test/sql/branching/postgres_catalog_main_schema.test` (requires `DUCKLAKE_CI`; skipped on SQLite config)
+
+**Fixes landed with this matrix**
+
+1. **SQLite `branch_id` DEFAULT portability** — sqlite_scanner left `ADD COLUMN … DEFAULT 0` as NULL, so lineage visibility hid `main`. Fixed via explicit `branch_id=0` on init, MigrateV12 backfill, and catalog version **1.1-dev5** (`MigrateV14`) NULL→0 backfill; lineage predicates also `COALESCE(branch_id, 0)`.
+2. **Postgres commit placeholders** — `PostgresMetadataManager::ExecuteQuery` now runs `SubstituteSnapshotPlaceholders` (was dropping `{BRANCH_ID*}`).
+3. **Portable fail-closed raises** — DuckDB `error()` is not valid in native Postgres SQL; `{RAISE_ON_ROWS_*}` expands to `error()` for DuckDB execution and PL/pgSQL `RAISE` for `postgres_execute`.
+
+CI `Catalogs.yml` remains the full `test/sql/*` gate.
 
 ### Risks
 

@@ -199,14 +199,30 @@ void DuckLakeMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckL
 	string data_path = StorePath(base_data_path);
 	string encryption_str = encryption == DuckLakeEncryption::ENCRYPTED ? "true" : "false";
 	string initial_schema_uuid = transaction.GenerateUUID();
-	initialize_query += StringUtil::Format(R"(
+	// Explicit branch_id=0 for writable-branch catalogs: some metadata backends (notably SQLite via
+	// sqlite_scanner) do not materialize ALTER/CREATE DEFAULT 0, leaving NULL which fails lineage
+	// visibility (`ancestor_branch_id = branch_id`).
+	if (ducklake_catalog.SupportsWritableBranches()) {
+		initialize_query += StringUtil::Format(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_snapshot(snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id, branch_id) VALUES (0, NOW(), 0, 1, 0, 0);
+INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
+INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '%s'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
+INSERT INTO {METADATA_CATALOG}.ducklake_schema(schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative, branch_id) VALUES (0, '%s'::UUID, 0, NULL, 'main', 'main/', true, 0);
+UPDATE {METADATA_CATALOG}.ducklake_snapshot SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_schema SET branch_id = 0 WHERE branch_id IS NULL;
+	)",
+		                                       GetVersionString(), DuckDB::SourceID(), SQLString(data_path),
+		                                       encryption_str, initial_schema_uuid);
+	} else {
+		initialize_query += StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot(snapshot_id, snapshot_time, schema_version, next_catalog_id, next_file_id) VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
 INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '%s'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
 INSERT INTO {METADATA_CATALOG}.ducklake_schema(schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative) VALUES (0, '%s'::UUID, 0, NULL, 'main', 'main/', true);
 	)",
-	                                       GetVersionString(), DuckDB::SourceID(), SQLString(data_path), encryption_str,
-	                                       initial_schema_uuid);
+		                                       GetVersionString(), DuckDB::SourceID(), SQLString(data_path),
+		                                       encryption_str, initial_schema_uuid);
+	}
 	auto result = Execute(initialize_query);
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to initialize DuckLake: ");
@@ -507,6 +523,21 @@ WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage WHERE
 INSERT INTO {METADATA_CATALOG}.ducklake_ref(ref_id, ref_name, ref_type, snapshot_id, parent_ref_id, status, created_at)
 SELECT 0, 'main', 'branch', (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot), NULL, 'active', NOW()
 WHERE NOT EXISTS (SELECT 1 FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_name = 'main');
+UPDATE {METADATA_CATALOG}.ducklake_snapshot SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_schema SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_view SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_column SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_data_file SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_delete_file SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_delete_file SET data_file_branch_id = 0 WHERE data_file_branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_macro SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_partition_info SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_sort_info SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table_stats SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table_column_stats SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_inlined_data_tables SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_schema_versions SET branch_id = 0 WHERE branch_id IS NULL;
 UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev3' WHERE key = 'version';
 	)";
 	ExecuteMigration(migrate_query, allow_failures, "1.1-dev2", "1.1-dev3");
@@ -532,6 +563,30 @@ WHERE status = 'active'
 UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev4' WHERE key = 'version';
 	)";
 	ExecuteMigration(migrate_query, allow_failures, "1.1-dev3", "1.1-dev4");
+}
+
+void DuckLakeMetadataManager::MigrateV14(bool allow_failures) {
+	// SQLite (and some Postgres attach paths) leave ADD COLUMN DEFAULT 0 as NULL on existing
+	// rows. NULL branch_id breaks lineage visibility and owned-row filters.
+	string migrate_query = R"(
+UPDATE {METADATA_CATALOG}.ducklake_snapshot SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_schema SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_view SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_column SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_data_file SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_delete_file SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_delete_file SET data_file_branch_id = 0 WHERE data_file_branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_macro SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_partition_info SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_sort_info SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table_stats SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_table_column_stats SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_inlined_data_tables SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_schema_versions SET branch_id = 0 WHERE branch_id IS NULL;
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev5' WHERE key = 'version';
+	)";
+	ExecuteMigration(migrate_query, allow_failures, "1.1-dev4", "1.1-dev5");
 }
 
 idx_t DuckLakeMetadataManager::CreateRef(const string &ref_name, const string &ref_type, idx_t snapshot_id,
@@ -1199,10 +1254,10 @@ string DuckLakeMetadataManager::BuildConvertTombstoneSiblingProbeSQL(idx_t sourc
 	// Lineage-capped AT reads may still see an end-dated row historically, but end-dating the
 	// shared live row is unsafe while a sibling (or other active branch) still depends on it.
 	for (auto &kind : CONVERT_TOMBSTONE_KINDS) {
-		sql += StringUtil::Format(R"(
-SELECT error('merge_tombstone_mode=convert_end_snapshot would break sibling branch visibility for %s object ' ||
+		sql += WrapRaiseOnRowsSQL(StringUtil::Format(R"(
+SELECT 'merge_tombstone_mode=convert_end_snapshot would break sibling branch visibility for %s object ' ||
              CAST(del.object_id AS VARCHAR) ||
-             '; use merge_tombstone_mode=reown_tombstone or merge/drop the sibling first')
+             '; use merge_tombstone_mode=reown_tombstone or merge/drop the sibling first' AS error_message
 FROM {METADATA_CATALOG}.%s del
 WHERE del.branch_id = %llu
   AND EXISTS (
@@ -1225,10 +1280,11 @@ WHERE del.branch_id = %llu
               AND sib_del.deleted_at_snapshot <= r.snapshot_id
           )
       )
-  );
+  )
 )",
-		                          kind.live, kind.deletion, source_branch_id, kind.live, kind.live_match_expr,
-		                          target_branch_id, source_branch_id, target_branch_id, kind.deletion);
+		                                             kind.live, kind.deletion, source_branch_id, kind.live,
+		                                             kind.live_match_expr, target_branch_id, source_branch_id,
+		                                             target_branch_id, kind.deletion));
 	}
 	return sql;
 }
@@ -6224,13 +6280,13 @@ WHERE end_snapshot IS NULL AND %s IN (%s) AND branch_id = {BRANCH_ID};)",
 	if (deletion_table.empty()) {
 		// No tombstone table (e.g. sort_info) — refuse inherited mutations rather than silently
 		// end-dating an ancestor-owned row.
-		batch += StringUtil::Format(
-		    R"(SELECT error('Cannot drop or alter objects inherited from another branch for table %s')
+		batch += WrapRaiseOnRowsSQL(StringUtil::Format(
+		    R"(SELECT 'Cannot drop or alter objects inherited from another branch for table %s' AS error_message
 WHERE EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.%s
 	WHERE end_snapshot IS NULL AND %s IN (%s) AND branch_id != {BRANCH_ID}
-);)",
-		    metadata_table_name, metadata_table_name, id_name, id_list);
+))",
+		    metadata_table_name, metadata_table_name, id_name, id_list));
 		return batch;
 	}
 	// Tombstone object_id must match LineageIntervalVisibility's object id column, which is the
@@ -6341,7 +6397,7 @@ string DuckLakeMetadataManager::LineageIntervalVisibility(const string &alias, c
 	    R"(EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage __dl_lin
 	WHERE __dl_lin.branch_id = {BRANCH_ID}
-	  AND __dl_lin.ancestor_branch_id = %sbranch_id
+	  AND __dl_lin.ancestor_branch_id = COALESCE(%sbranch_id, 0)
 	  AND %sbegin_snapshot <= LEAST({SNAPSHOT_ID}, __dl_lin.max_visible_snapshot)
 	  AND (%send_snapshot IS NULL OR %send_snapshot > LEAST({SNAPSHOT_ID}, __dl_lin.max_visible_snapshot))
 ))",
@@ -6351,7 +6407,7 @@ string DuckLakeMetadataManager::LineageIntervalVisibility(const string &alias, c
 		    R"( AND NOT EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.%s __dl_del
 	WHERE __dl_del.branch_id = {BRANCH_ID}
-	  AND __dl_del.ancestor_branch_id = %sbranch_id
+	  AND __dl_del.ancestor_branch_id = COALESCE(%sbranch_id, 0)
 	  AND __dl_del.object_id = %s%s
 	  AND __dl_del.deleted_at_snapshot <= {SNAPSHOT_ID}
 ))",
@@ -6370,13 +6426,13 @@ string DuckLakeMetadataManager::ColumnLineageIntervalVisibility(const string &al
 	    R"(EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.ducklake_branch_lineage __dl_lin
 	WHERE __dl_lin.branch_id = {BRANCH_ID}
-	  AND __dl_lin.ancestor_branch_id = %sbranch_id
+	  AND __dl_lin.ancestor_branch_id = COALESCE(%sbranch_id, 0)
 	  AND %sbegin_snapshot <= LEAST({SNAPSHOT_ID}, __dl_lin.max_visible_snapshot)
 	  AND (%send_snapshot IS NULL OR %send_snapshot > LEAST({SNAPSHOT_ID}, __dl_lin.max_visible_snapshot))
 ) AND NOT EXISTS (
 	SELECT 1 FROM {METADATA_CATALOG}.ducklake_deletion_column __dl_del
 	WHERE __dl_del.branch_id = {BRANCH_ID}
-	  AND __dl_del.ancestor_branch_id = %sbranch_id
+	  AND __dl_del.ancestor_branch_id = COALESCE(%sbranch_id, 0)
 	  AND __dl_del.object_id = ((%stable_id::BIGINT * 4294967296) + %scolumn_id)
 	  AND __dl_del.deleted_at_snapshot <= {SNAPSHOT_ID}
 ))",
@@ -6469,6 +6525,41 @@ void DuckLakeMetadataManager::SubstituteSnapshotPlaceholders(DuckLakeSnapshot sn
 	query = StringUtil::Replace(query, "{COMMIT_EXTRA_INFO}", commit_info.commit_extra_info.ToSQLString());
 }
 
+void DuckLakeMetadataManager::ExpandRaiseOnRowsPlaceholders(string &query, bool postgres_native) const {
+	static const string RAISE_BEGIN = "{RAISE_ON_ROWS_BEGIN}";
+	static const string RAISE_END = "{RAISE_ON_ROWS_END}";
+	idx_t begin_pos;
+	while ((begin_pos = query.find(RAISE_BEGIN)) != string::npos) {
+		auto end_pos = query.find(RAISE_END, begin_pos);
+		if (end_pos == string::npos) {
+			throw InternalException("Unclosed {RAISE_ON_ROWS_BEGIN} placeholder in DuckLake SQL");
+		}
+		auto inner_start = begin_pos + RAISE_BEGIN.size();
+		auto inner = query.substr(inner_start, end_pos - inner_start);
+		string replacement;
+		if (postgres_native) {
+			replacement = StringUtil::Format(R"(
+DO $ducklake$
+DECLARE __dl_msg TEXT;
+BEGIN
+  SELECT error_message INTO __dl_msg FROM (%s) __dl_err LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION '%%', __dl_msg;
+  END IF;
+END $ducklake$;
+)",
+			                                 inner);
+		} else {
+			replacement = StringUtil::Format("SELECT error(error_message) FROM (%s) __dl_err;\n", inner);
+		}
+		query.replace(begin_pos, end_pos + RAISE_END.size() - begin_pos, replacement);
+	}
+}
+
+string DuckLakeMetadataManager::WrapRaiseOnRowsSQL(const string &row_select_sql) {
+	return "{RAISE_ON_ROWS_BEGIN}" + row_select_sql + "{RAISE_ON_ROWS_END}";
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
 	return Query(snapshot, query);
 }
@@ -6483,6 +6574,9 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string &query) {
+	// Execute(string)/Query(string) always run through DuckDB (even for Postgres catalogs), so use
+	// DuckDB error() — not PL/pgSQL. Snapshot Execute may later rewrite for native Postgres.
+	ExpandRaiseOnRowsPlaceholders(query, false);
 	SubstituteCatalogPlaceholders(query);
 	return transaction.ExecuteRaw(query);
 }

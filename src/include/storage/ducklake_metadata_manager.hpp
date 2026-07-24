@@ -204,6 +204,11 @@ public:
 protected:
 	void SubstituteCatalogPlaceholders(string &query) const;
 	void SubstituteSnapshotPlaceholders(DuckLakeSnapshot snapshot, string &query) const;
+	//! Expand `{RAISE_ON_ROWS_BEGIN}`…`{RAISE_ON_ROWS_END}` wrappers.
+	//! `postgres_native` selects PL/pgSQL RAISE (SQL sent to Postgres) vs DuckDB `error()`.
+	void ExpandRaiseOnRowsPlaceholders(string &query, bool postgres_native) const;
+	//! Wrap a SELECT that returns VARCHAR `error_message` for fail-closed raises.
+	static string WrapRaiseOnRowsSQL(const string &row_select_sql);
 
 public:
 	//! Expand `{BRANCH_ID_COL}`, `{BRANCH_ID_VAL}`, `{BRANCH_STATS_FILTER}`, `{BRANCH_OWNED_FILTER}`,
@@ -430,6 +435,8 @@ public:
 	virtual void MigrateV12(bool allow_failures = false);
 	//! 1.1-dev3 → 1.1-dev4: append-only ref history log
 	virtual void MigrateV13(bool allow_failures = false);
+	//! 1.1-dev4 → 1.1-dev5: backfill NULL branch_id to 0 (SQLite/Postgres DEFAULT portability)
+	virtual void MigrateV14(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 

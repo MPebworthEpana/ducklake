@@ -48,7 +48,8 @@
     {
       "reason": "Test only for SQLite as catalog",
       "paths": [
-        "test/sql/metadata/ducklake_settings_sqlite.test"
+        "test/sql/metadata/ducklake_settings_sqlite.test",
+        "test/sql/branching/sqlite_catalog_main_schema.test"
       ]
     },
     {

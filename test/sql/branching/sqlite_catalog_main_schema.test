@@ -1,0 +1,47 @@
+# name: test/sql/branching/sqlite_catalog_main_schema.test
+# description: F3 — SQLite catalog creates visible main schema (branch_id default portability)
+# group: [branching]
+
+require ducklake
+
+require parquet
+
+require sqlite_scanner
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:sqlite:{TEST_DIR}/{UUID}.db' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_sqlite_main', DATA_INLINING_ROW_LIMIT 0)
+
+statement ok
+CREATE TABLE ducklake.base(i INTEGER);
+
+statement ok
+INSERT INTO ducklake.base VALUES (1), (2);
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+2
+
+statement ok
+CALL ducklake.create_branch('dev')
+
+statement ok
+CALL ducklake.use_branch('dev')
+
+statement ok
+INSERT INTO ducklake.base VALUES (3);
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+3
+
+statement ok
+CALL ducklake.use_branch('main')
+
+query I
+SELECT count(*) FROM ducklake.base;
+----
+2
