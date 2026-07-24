@@ -592,9 +592,8 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev5' WHERE key = '
 idx_t DuckLakeMetadataManager::CreateRef(const string &ref_name, const string &ref_type, idx_t snapshot_id,
                                          optional_idx parent_ref_id) {
 	if (!transaction.GetCatalog().SupportsRefs()) {
-		throw InvalidInputException(
-		    "Named refs (branches/tags) require DuckLake catalog version >= 1.1-dev2. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("Named refs (branches/tags) require DuckLake catalog version >= 1.1-dev2. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	if (ref_type != "branch" && ref_type != "tag") {
 		throw InvalidInputException("ref_type must be 'branch' or 'tag', got '%s'", ref_type);
@@ -664,9 +663,8 @@ FROM {METADATA_CATALOG}.ducklake_table_column_stats WHERE branch_id = %llu;)",
 
 void DuckLakeMetadataManager::DropRef(const string &ref_name, const string &ref_type) {
 	if (!transaction.GetCatalog().SupportsRefs()) {
-		throw InvalidInputException(
-		    "Named refs (branches/tags) require DuckLake catalog version >= 1.1-dev2. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("Named refs (branches/tags) require DuckLake catalog version >= 1.1-dev2. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	if (transaction.GetCatalog().SupportsWritableBranches() && ref_type == "branch" &&
 	    StringUtil::CIEquals(ref_name, "main")) {
@@ -692,8 +690,8 @@ WHERE parent_ref_id = %llu AND status = 'active' AND ref_type = 'branch')",
 		}
 		if (!child_names.empty()) {
 			throw InvalidInputException(
-			    "Cannot drop branch \"%s\": child branch(es) still exist (%s). Drop or merge them first.",
-			    ref_name, StringUtil::Join(child_names, ", "));
+			    "Cannot drop branch \"%s\": child branch(es) still exist (%s). Drop or merge them first.", ref_name,
+			    StringUtil::Join(child_names, ", "));
 		}
 
 		// Phase 3: reclaim branch-owned snapshots and metadata, then schedule unreachable files.
@@ -712,9 +710,10 @@ WHERE parent_ref_id = %llu AND status = 'active' AND ref_type = 'branch')",
 			to_delete.push_back(std::move(info));
 		}
 
-		AppendRefLog(existing.ref_id, existing.ref_name, existing.ref_type, existing.snapshot_id, optional_idx(), "drop");
-		auto delete_ref = Execute(StringUtil::Format(
-		    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
+		AppendRefLog(existing.ref_id, existing.ref_name, existing.ref_type, existing.snapshot_id, optional_idx(),
+		             "drop");
+		auto delete_ref = Execute(
+		    StringUtil::Format(R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
 		if (delete_ref->HasError()) {
 			delete_ref->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
 		}
@@ -731,7 +730,7 @@ FROM {METADATA_CATALOG}.ducklake_delete_file
 WHERE branch_id = %llu
   AND delete_file_id NOT IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion)
 )",
-		                                               existing.ref_id, existing.ref_id));
+		                                                existing.ref_id, existing.ref_id));
 		if (file_candidates->HasError()) {
 			file_candidates->GetErrorObject().Throw("Failed to list branch-owned files for cleanup: ");
 		}
@@ -743,17 +742,18 @@ WHERE branch_id = %llu
 			if (!scheduled_values.empty()) {
 				scheduled_values += ", ";
 			}
-			scheduled_values += StringUtil::Format("(%llu, %s, %s, NOW())", row.GetValue<idx_t>(0),
-			                                       SQLString(row.GetValue<string>(2)),
-			                                       row.GetValue<bool>(3) ? "true" : "false");
+			scheduled_values +=
+			    StringUtil::Format("(%llu, %s, %s, NOW())", row.GetValue<idx_t>(0), SQLString(row.GetValue<string>(2)),
+			                       row.GetValue<bool>(3) ? "true" : "false");
 		}
 
 		string schedule_sql;
 		if (!scheduled_values.empty()) {
-			schedule_sql +=
-			    "INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion VALUES " + scheduled_values + ";\n";
+			schedule_sql += "INSERT INTO {METADATA_CATALOG}.ducklake_files_scheduled_for_deletion VALUES " +
+			                scheduled_values + ";\n";
 		}
-		schedule_sql += StringUtil::Format(R"(
+		schedule_sql += StringUtil::Format(
+		    R"(
 DELETE FROM {METADATA_CATALOG}.ducklake_file_column_stats
 WHERE data_file_id IN (SELECT data_file_id FROM {METADATA_CATALOG}.ducklake_data_file WHERE branch_id = %llu);
 DELETE FROM {METADATA_CATALOG}.ducklake_file_variant_stats
@@ -780,10 +780,10 @@ DELETE FROM {METADATA_CATALOG}.ducklake_deletion_delete_file WHERE branch_id = %
 DELETE FROM {METADATA_CATALOG}.ducklake_deletion_macro WHERE branch_id = %llu;
 DELETE FROM {METADATA_CATALOG}.ducklake_deletion_partition WHERE branch_id = %llu;
 )",
-		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
 		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
 		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
-		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id);
+		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id,
+		    existing.ref_id, existing.ref_id, existing.ref_id, existing.ref_id);
 		auto schedule = Execute(schedule_sql);
 		if (schedule->HasError()) {
 			schedule->GetErrorObject().Throw("Failed to reclaim DuckLake branch-owned files: ");
@@ -810,9 +810,10 @@ DELETE FROM {METADATA_CATALOG}.ducklake_snapshot WHERE snapshot_id IN (%s);
 		}
 	}
 	if (!ref_deleted) {
-		AppendRefLog(existing.ref_id, existing.ref_name, existing.ref_type, existing.snapshot_id, optional_idx(), "drop");
-		auto result = Execute(StringUtil::Format(
-		    R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
+		AppendRefLog(existing.ref_id, existing.ref_name, existing.ref_type, existing.snapshot_id, optional_idx(),
+		             "drop");
+		auto result = Execute(
+		    StringUtil::Format(R"(DELETE FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu;)", existing.ref_id));
 		if (result->HasError()) {
 			result->GetErrorObject().Throw("Failed to drop DuckLake ref: ");
 		}
@@ -904,8 +905,7 @@ set<idx_t> DuckLakeMetadataManager::GetPinnedSnapshotIds() {
 		return pinned;
 	}
 	// Live ref heads (branches + tags)
-	auto result = Query(
-	    "SELECT DISTINCT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE status = 'active'");
+	auto result = Query("SELECT DISTINCT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE status = 'active'");
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to list pinned DuckLake snapshots: ");
 	}
@@ -943,8 +943,8 @@ WHERE ref_id = %llu AND snapshot_id = %llu AND ref_type = 'branch' AND status = 
 	}
 	// Verify CAS succeeded
 	DuckLakeRefInfo out;
-	auto check = Query(StringUtil::Format(
-	    "SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu", ref_id));
+	auto check = Query(
+	    StringUtil::Format("SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu", ref_id));
 	if (check->HasError()) {
 		check->GetErrorObject().Throw("Failed to verify DuckLake branch head update: ");
 	}
@@ -953,8 +953,8 @@ WHERE ref_id = %llu AND snapshot_id = %llu AND ref_type = 'branch' AND status = 
 		ok = row.GetValue<idx_t>(0) == new_snapshot_id;
 	}
 	if (!ok) {
-		throw TransactionException(
-		    "Transaction conflict - branch head changed concurrently (expected snapshot %llu)", expected_snapshot_id);
+		throw TransactionException("Transaction conflict - branch head changed concurrently (expected snapshot %llu)",
+		                           expected_snapshot_id);
 	}
 	auto ref_query = Query(StringUtil::Format(
 	    "SELECT ref_name, ref_type FROM {METADATA_CATALOG}.ducklake_ref WHERE ref_id = %llu", ref_id));
@@ -1035,14 +1035,14 @@ WHERE src.branch_id = %llu AND tgt.branch_id = %llu)",
 }
 
 SnapshotChangeInformation DuckLakeMetadataManager::GetBranchChangesSince(idx_t branch_id, idx_t after_snapshot,
-                                                                          idx_t through_snapshot) {
+                                                                         idx_t through_snapshot) {
 	SnapshotChangeInformation aggregated;
 	if (through_snapshot <= after_snapshot) {
 		return aggregated;
 	}
-	auto snapshots = GetAllSnapshots(StringUtil::Format(
-	    "s.snapshot_id > %llu AND s.snapshot_id <= %llu AND s.branch_id = %llu", after_snapshot, through_snapshot,
-	    branch_id));
+	auto snapshots =
+	    GetAllSnapshots(StringUtil::Format("s.snapshot_id > %llu AND s.snapshot_id <= %llu AND s.branch_id = %llu",
+	                                       after_snapshot, through_snapshot, branch_id));
 	for (auto &snapshot : snapshots) {
 		if (snapshot.change_info.changes_made.empty()) {
 			continue;
@@ -1053,9 +1053,8 @@ SnapshotChangeInformation DuckLakeMetadataManager::GetBranchChangesSince(idx_t b
 	return aggregated;
 }
 
-set<DataFileIndex> DuckLakeMetadataManager::GetFilesDeletedOrDroppedInRange(idx_t branch_id,
-                                                                              idx_t after_snapshot,
-                                                                              idx_t through_snapshot) {
+set<DataFileIndex> DuckLakeMetadataManager::GetFilesDeletedOrDroppedInRange(idx_t branch_id, idx_t after_snapshot,
+                                                                            idx_t through_snapshot) {
 	set<DataFileIndex> result;
 	if (through_snapshot <= after_snapshot) {
 		return result;
@@ -1181,9 +1180,8 @@ string DuckLakeMetadataManager::BuildReownNonTombstoneSQL(idx_t source_branch_id
 	                        "ducklake_schema_versions"};
 	string sql;
 	for (auto &table : tables) {
-		sql += StringUtil::Format(
-		    "UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n", table, target_branch_id,
-		    source_branch_id);
+		sql += StringUtil::Format("UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n", table,
+		                          target_branch_id, source_branch_id);
 	}
 	sql += StringUtil::Format(
 	    R"(
@@ -1215,14 +1213,13 @@ WHERE ts.branch_id = %llu;
 }
 
 string DuckLakeMetadataManager::BuildReownTombstonesSQL(idx_t source_branch_id, idx_t target_branch_id) {
-	const char *tables[] = {"ducklake_deletion_schema",  "ducklake_deletion_table",     "ducklake_deletion_view",
-	                        "ducklake_deletion_column",  "ducklake_deletion_data_file", "ducklake_deletion_delete_file",
-	                        "ducklake_deletion_macro",   "ducklake_deletion_partition"};
+	const char *tables[] = {"ducklake_deletion_schema", "ducklake_deletion_table",     "ducklake_deletion_view",
+	                        "ducklake_deletion_column", "ducklake_deletion_data_file", "ducklake_deletion_delete_file",
+	                        "ducklake_deletion_macro",  "ducklake_deletion_partition"};
 	string sql;
 	for (auto &table : tables) {
-		sql += StringUtil::Format(
-		    "UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n", table, target_branch_id,
-		    source_branch_id);
+		sql += StringUtil::Format("UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n", table,
+		                          target_branch_id, source_branch_id);
 	}
 	return sql;
 }
@@ -1348,8 +1345,8 @@ static bool HasCreatedMacros(const SnapshotChangeInformation &changes) {
 static bool HasSchemaChangingChanges(const SnapshotChangeInformation &changes) {
 	return !changes.created_schemas.empty() || !changes.dropped_schemas.empty() || HasCreatedTables(changes) ||
 	       HasCreatedMacros(changes) || !changes.altered_tables.empty() || !changes.altered_views.empty() ||
-	       !changes.dropped_tables.empty() || !changes.dropped_views.empty() || !changes.dropped_scalar_macros.empty() ||
-	       !changes.dropped_table_macros.empty();
+	       !changes.dropped_tables.empty() || !changes.dropped_views.empty() ||
+	       !changes.dropped_scalar_macros.empty() || !changes.dropped_table_macros.empty();
 }
 
 static string CherryPickUnsupportedReason(const SnapshotChangeInformation &changes) {
@@ -1374,13 +1371,11 @@ static void AddChangedTables(set<TableIndex> &tables, const SnapshotChangeInform
 
 } // namespace
 
-DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &source_branch,
-                                                               const string &target_branch, bool dry_run,
-                                                               const string &merge_tombstone_mode) {
+DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &source_branch, const string &target_branch,
+                                                               bool dry_run, const string &merge_tombstone_mode) {
 	if (!transaction.GetCatalog().SupportsWritableBranches()) {
-		throw InvalidInputException(
-		    "ducklake_merge_branch requires DuckLake catalog version >= 1.1-dev3. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("ducklake_merge_branch requires DuckLake catalog version >= 1.1-dev3. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	DuckLakeRefInfo source_ref;
 	DuckLakeRefInfo target_ref;
@@ -1412,10 +1407,8 @@ DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &sou
 	}
 
 	bool fast_forward = result.target_head == result.ancestor_snapshot;
-	auto source_delta =
-	    GetBranchChangesSince(source_ref.ref_id, result.ancestor_snapshot, result.source_head);
-	auto target_delta =
-	    GetBranchChangesSince(target_ref.ref_id, result.ancestor_snapshot, result.target_head);
+	auto source_delta = GetBranchChangesSince(source_ref.ref_id, result.ancestor_snapshot, result.source_head);
+	auto target_delta = GetBranchChangesSince(target_ref.ref_id, result.ancestor_snapshot, result.target_head);
 
 	if (!fast_forward) {
 		auto conflicts = DetectConflicts(source_delta, target_delta);
@@ -1428,14 +1421,14 @@ DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &sou
 			}
 		}
 		if (both_deleted) {
-			auto source_files = GetFilesDeletedOrDroppedInRange(source_ref.ref_id, result.ancestor_snapshot,
-			                                                    result.source_head);
-			auto target_files = GetFilesDeletedOrDroppedInRange(target_ref.ref_id, result.ancestor_snapshot,
-			                                                    result.target_head);
+			auto source_files =
+			    GetFilesDeletedOrDroppedInRange(source_ref.ref_id, result.ancestor_snapshot, result.source_head);
+			auto target_files =
+			    GetFilesDeletedOrDroppedInRange(target_ref.ref_id, result.ancestor_snapshot, result.target_head);
 			for (auto &file_id : source_files) {
 				if (target_files.find(file_id) != target_files.end()) {
-					conflicts.push_back(StringUtil::Format("overlapping file-level deletes on file %llu",
-					                                       file_id.index));
+					conflicts.push_back(
+					    StringUtil::Format("overlapping file-level deletes on file %llu", file_id.index));
 				}
 			}
 		}
@@ -1477,8 +1470,7 @@ DuckLakeMergeBranchResult DuckLakeMetadataManager::MergeBranch(const string &sou
 		result.new_target_head = fast_forward ? result.source_head : result.target_head;
 		// Probe convert sibling safety without mutating metadata (same checks as apply).
 		if (tombstone_mode == "convert_end_snapshot") {
-			auto probe =
-			    Execute(BuildConvertTombstoneSiblingProbeSQL(source_ref.ref_id, target_ref.ref_id));
+			auto probe = Execute(BuildConvertTombstoneSiblingProbeSQL(source_ref.ref_id, target_ref.ref_id));
 			if (probe->HasError()) {
 				result.merge_type = "conflicts";
 				result.messages.clear();
@@ -1565,16 +1557,15 @@ WHERE snapshot_id = %llu;
 	}
 
 	if (transaction.GetCatalog().GetInliningLayout() == "shared_table") {
-		auto inlined_tables =
-		    Query("SELECT DISTINCT table_name FROM {METADATA_CATALOG}.ducklake_inlined_data_tables");
+		auto inlined_tables = Query("SELECT DISTINCT table_name FROM {METADATA_CATALOG}.ducklake_inlined_data_tables");
 		if (inlined_tables->HasError()) {
 			inlined_tables->GetErrorObject().Throw("Failed to list shared inlined-data tables during merge: ");
 		}
 		string reown_inlined_rows;
 		for (auto &row : *inlined_tables) {
-			reown_inlined_rows += StringUtil::Format(
-			    "UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n",
-			    SQLIdentifier(row.GetValue<string>(0)), target_ref.ref_id, source_ref.ref_id);
+			reown_inlined_rows +=
+			    StringUtil::Format("UPDATE {METADATA_CATALOG}.%s SET branch_id = %llu WHERE branch_id = %llu;\n",
+			                       SQLIdentifier(row.GetValue<string>(0)), target_ref.ref_id, source_ref.ref_id);
 		}
 		if (!reown_inlined_rows.empty()) {
 			auto inlined_reown = Execute(reown_inlined_rows);
@@ -1616,7 +1607,8 @@ UPDATE {METADATA_CATALOG}.ducklake_ref SET snapshot_id = %llu WHERE ref_id = %ll
 	if (lineage->HasError()) {
 		lineage->GetErrorObject().Throw("Failed to update DuckLake branch lineage after merge: ");
 	}
-	AppendRefLog(source_ref.ref_id, source_ref.ref_name, source_ref.ref_type, source_ref.snapshot_id, new_head, "merge");
+	AppendRefLog(source_ref.ref_id, source_ref.ref_name, source_ref.ref_type, source_ref.snapshot_id, new_head,
+	             "merge");
 
 	result.new_target_head = new_head;
 	result.messages.push_back(StringUtil::Format("New target head: %llu", new_head));
@@ -1754,8 +1746,8 @@ FROM {METADATA_CATALOG}.%s %s
 WHERE %s.%s = %llu AND %s
 LIMIT 1
 )",
-	                                                              metadata_table, alias, alias, id_column, object_id,
-	                                                              VisibilityPlaceholderFor(metadata_table)));
+	                                                                 metadata_table, alias, alias, id_column, object_id,
+	                                                                 VisibilityPlaceholderFor(metadata_table)));
 	if (visible->HasError()) {
 		visible->GetErrorObject().Throw(StringUtil::Format("Failed to verify %s object visibility: ", operation));
 	}
@@ -1787,7 +1779,7 @@ FROM {METADATA_CATALOG}.ducklake_table tbl
 WHERE tbl.table_id = %llu AND {VISIBLE_TABLE}
 LIMIT 1
 )",
-	                                                             table_id.index));
+	                                                                 table_id.index));
 	if (visible->HasError()) {
 		visible->GetErrorObject().Throw(StringUtil::Format("Failed to verify %s table dependency: ", operation));
 	}
@@ -1796,8 +1788,8 @@ LIMIT 1
 		return;
 	}
 	throw InvalidInputException(
-	    "Cannot %s snapshot %llu: table %llu is not visible on target branch \"%s\" at snapshot %llu",
-	    operation, source_snapshot_id, table_id.index, target_ref.ref_name, target_snapshot.snapshot_id);
+	    "Cannot %s snapshot %llu: table %llu is not visible on target branch \"%s\" at snapshot %llu", operation,
+	    source_snapshot_id, table_id.index, target_ref.ref_name, target_snapshot.snapshot_id);
 }
 
 static void CheckCherryPickDataFileVisible(DuckLakeMetadataManager &manager, const DuckLakeSnapshot &target_snapshot,
@@ -1809,7 +1801,7 @@ FROM {METADATA_CATALOG}.ducklake_data_file data
 WHERE data.data_file_id = %llu AND {VISIBLE_DATA_FILE}
 LIMIT 1
 )",
-	                                                             data_file_id));
+	                                                                 data_file_id));
 	if (visible->HasError()) {
 		visible->GetErrorObject().Throw(StringUtil::Format("Failed to verify %s data-file dependency: ", operation));
 	}
@@ -1824,9 +1816,9 @@ LIMIT 1
 }
 
 static void ValidateCherryPickDependencies(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
-                                           const DuckLakeRefInfo &target_ref,
-                                           const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id,
-                                           const SnapshotChangeInformation &source_delta, const string &operation,
+                                           const DuckLakeRefInfo &target_ref, const DuckLakeSnapshot &target_snapshot,
+                                           idx_t source_snapshot_id, const SnapshotChangeInformation &source_delta,
+                                           const string &operation,
                                            const set<idx_t> &source_data_files_created_by_range,
                                            const CherryPickCreatedObjects &source_objects_created_by_range) {
 	set<TableIndex> touched_tables;
@@ -1834,14 +1826,16 @@ static void ValidateCherryPickDependencies(DuckLakeMetadataManager &manager, con
 	touched_tables.insert(source_delta.altered_tables.begin(), source_delta.altered_tables.end());
 	touched_tables.insert(source_delta.dropped_tables.begin(), source_delta.dropped_tables.end());
 	for (auto &table_id : touched_tables) {
-		if (source_objects_created_by_range.tables.find(table_id.index) != source_objects_created_by_range.tables.end()) {
+		if (source_objects_created_by_range.tables.find(table_id.index) !=
+		    source_objects_created_by_range.tables.end()) {
 			continue;
 		}
 		CheckCherryPickTableVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, table_id);
 	}
 
 	for (auto &schema_id : source_delta.dropped_schemas) {
-		if (source_objects_created_by_range.schemas.find(schema_id.index) != source_objects_created_by_range.schemas.end()) {
+		if (source_objects_created_by_range.schemas.find(schema_id.index) !=
+		    source_objects_created_by_range.schemas.end()) {
 			continue;
 		}
 		CheckCherryPickObjectVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, "schema",
@@ -1862,21 +1856,24 @@ static void ValidateCherryPickDependencies(DuckLakeMetadataManager &manager, con
 		                             "ducklake_view", "view_id", view_id.index);
 	}
 	for (auto &macro_id : source_delta.dropped_scalar_macros) {
-		if (source_objects_created_by_range.macros.find(macro_id.index) != source_objects_created_by_range.macros.end()) {
+		if (source_objects_created_by_range.macros.find(macro_id.index) !=
+		    source_objects_created_by_range.macros.end()) {
 			continue;
 		}
 		CheckCherryPickObjectVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, "macro",
 		                             "ducklake_macro", "macro_id", macro_id.index);
 	}
 	for (auto &macro_id : source_delta.dropped_table_macros) {
-		if (source_objects_created_by_range.macros.find(macro_id.index) != source_objects_created_by_range.macros.end()) {
+		if (source_objects_created_by_range.macros.find(macro_id.index) !=
+		    source_objects_created_by_range.macros.end()) {
 			continue;
 		}
 		CheckCherryPickObjectVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, "macro",
 		                             "ducklake_macro", "macro_id", macro_id.index);
 	}
 
-	auto missing_delete_dependencies = manager.Query(StringUtil::Format(R"(
+	auto missing_delete_dependencies = manager.Query(StringUtil::Format(
+	    R"(
 SELECT DISTINCT df.data_file_id
 FROM {METADATA_CATALOG}.ducklake_delete_file df
 WHERE df.branch_id = %llu AND df.begin_snapshot = %llu
@@ -1893,11 +1890,8 @@ SELECT DISTINCT data.data_file_id
 FROM {METADATA_CATALOG}.ducklake_data_file data
 WHERE data.branch_id = %llu AND data.end_snapshot = %llu AND data.begin_snapshot <> %llu
 )",
-	                                                                 source_ref.ref_id, source_snapshot_id,
-	                                                                 source_ref.ref_id, source_snapshot_id,
-	                                                                 source_ref.ref_id, source_snapshot_id,
-	                                                                 source_ref.ref_id, source_snapshot_id,
-	                                                                 source_snapshot_id));
+	    source_ref.ref_id, source_snapshot_id, source_ref.ref_id, source_snapshot_id, source_ref.ref_id,
+	    source_snapshot_id, source_ref.ref_id, source_snapshot_id, source_snapshot_id));
 	if (missing_delete_dependencies->HasError()) {
 		missing_delete_dependencies->GetErrorObject().Throw(
 		    StringUtil::Format("Failed to inspect %s delete dependencies: ", operation));
@@ -1907,7 +1901,8 @@ WHERE data.branch_id = %llu AND data.end_snapshot = %llu AND data.begin_snapshot
 		if (source_data_files_created_by_range.find(data_file_id) != source_data_files_created_by_range.end()) {
 			continue;
 		}
-		CheckCherryPickDataFileVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation, data_file_id);
+		CheckCherryPickDataFileVisible(manager, target_snapshot, target_ref, source_snapshot_id, operation,
+		                               data_file_id);
 	}
 }
 
@@ -1931,7 +1926,8 @@ static CherryPickCreatedObjects ReadSourceObjectsCreatedAt(DuckLakeMetadataManag
                                                            const DuckLakeRefInfo &source_ref,
                                                            idx_t source_snapshot_id) {
 	CherryPickCreatedObjects created;
-	auto result = manager.Query(StringUtil::Format(R"(
+	auto result =
+	    manager.Query(StringUtil::Format(R"(
 SELECT 'schema' AS object_type, schema_id AS object_id
 FROM {METADATA_CATALOG}.ducklake_schema
 WHERE branch_id = %llu AND begin_snapshot = %llu
@@ -1948,9 +1944,8 @@ SELECT 'macro' AS object_type, macro_id AS object_id
 FROM {METADATA_CATALOG}.ducklake_macro
 WHERE branch_id = %llu AND begin_snapshot = %llu
 )",
-	                                             source_ref.ref_id, source_snapshot_id, source_ref.ref_id,
-	                                             source_snapshot_id, source_ref.ref_id, source_snapshot_id,
-	                                             source_ref.ref_id, source_snapshot_id));
+	                                     source_ref.ref_id, source_snapshot_id, source_ref.ref_id, source_snapshot_id,
+	                                     source_ref.ref_id, source_snapshot_id, source_ref.ref_id, source_snapshot_id));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to read source DDL objects for transplant dependency validation: ");
 	}
@@ -1986,14 +1981,11 @@ static bool CreatedObjectsContain(const CherryPickCreatedObjects &created, const
 	throw InternalException("Unsupported created object kind %s", kind);
 }
 
-static void ValidateCherryPickCreatedCatalogRows(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
-                                                 const DuckLakeRefInfo &target_ref,
-                                                 const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id,
-                                                 const string &operation, const string &metadata_table,
-                                                 const string &id_column, const string &uuid_column,
-                                                 const string &schema_column, const string &name_column,
-                                                 const string &object_kind,
-                                                 const CherryPickCreatedObjects &created_by_range) {
+static void ValidateCherryPickCreatedCatalogRows(
+    DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref, const DuckLakeRefInfo &target_ref,
+    const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id, const string &operation,
+    const string &metadata_table, const string &id_column, const string &uuid_column, const string &schema_column,
+    const string &name_column, const string &object_kind, const CherryPickCreatedObjects &created_by_range) {
 	auto created = manager.Query(StringUtil::Format(R"(
 SELECT %s, %s, %s, %s
 FROM {METADATA_CATALOG}.%s
@@ -2003,8 +1995,8 @@ WHERE branch_id = %llu AND begin_snapshot = %llu
 	                                                schema_column.empty() ? "0" : schema_column, name_column,
 	                                                metadata_table, source_ref.ref_id, source_snapshot_id));
 	if (created->HasError()) {
-		created->GetErrorObject().Throw(StringUtil::Format("Failed to inspect %s created %ss: ", operation,
-		                                                    object_kind));
+		created->GetErrorObject().Throw(
+		    StringUtil::Format("Failed to inspect %s created %ss: ", operation, object_kind));
 	}
 	for (auto &row : *created) {
 		auto object_id = row.GetValue<idx_t>(0);
@@ -2020,15 +2012,15 @@ WHERE branch_id = %llu AND begin_snapshot = %llu
 		bool same_uuid_visible = false;
 		if (!uuid_column.empty()) {
 			auto alias = AliasForMetadataTable(metadata_table);
-			auto visible_id = manager.Query(target_snapshot, StringUtil::Format(R"(
+			auto visible_id = manager.Query(
+			    target_snapshot, StringUtil::Format(R"(
 SELECT %s.%s
 FROM {METADATA_CATALOG}.%s %s
 WHERE %s.%s = %llu AND %s
 LIMIT 1
 )",
-			                                                                 alias, uuid_column, metadata_table, alias,
-			                                                                 alias, id_column, object_id,
-			                                                                 VisibilityPlaceholderFor(metadata_table)));
+			                                        alias, uuid_column, metadata_table, alias, alias, id_column,
+			                                        object_id, VisibilityPlaceholderFor(metadata_table)));
 			if (visible_id->HasError()) {
 				visible_id->GetErrorObject().Throw(
 				    StringUtil::Format("Failed to verify %s %s id visibility: ", operation, object_kind));
@@ -2052,21 +2044,19 @@ LIMIT 1
 		}
 
 		auto alias = AliasForMetadataTable(metadata_table);
-		string schema_filter = schema_column.empty() ? string()
-		                                             : StringUtil::Format(" AND %s.%s = %llu", alias, schema_column,
-		                                                                  schema_id);
-		auto name_conflict = manager.Query(target_snapshot, StringUtil::Format(R"(
+		string schema_filter =
+		    schema_column.empty() ? string() : StringUtil::Format(" AND %s.%s = %llu", alias, schema_column, schema_id);
+		auto name_conflict = manager.Query(
+		    target_snapshot, StringUtil::Format(R"(
 SELECT 1
 FROM {METADATA_CATALOG}.%s %s
 WHERE %s.%s = %s%s AND %s
   AND NOT (%s.%s = %llu%s)
 LIMIT 1
 )",
-		                                                                       metadata_table, alias, alias, name_column,
-		                                                                       SQLString(object_name), schema_filter,
-		                                                                       VisibilityPlaceholderFor(metadata_table),
-		                                                                       alias, id_column, object_id,
-		                                                                       same_uuid_visible ? "" : " AND false"));
+		                                        metadata_table, alias, alias, name_column, SQLString(object_name),
+		                                        schema_filter, VisibilityPlaceholderFor(metadata_table), alias,
+		                                        id_column, object_id, same_uuid_visible ? "" : " AND false"));
 		if (name_conflict->HasError()) {
 			name_conflict->GetErrorObject().Throw(
 			    StringUtil::Format("Failed to verify %s %s name uniqueness: ", operation, object_kind));
@@ -2080,9 +2070,9 @@ LIMIT 1
 }
 
 static void ValidateCherryPickCreatedObjects(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
-                                             const DuckLakeRefInfo &target_ref,
-                                             const DuckLakeSnapshot &target_snapshot, idx_t source_snapshot_id,
-                                             const SnapshotChangeInformation &source_delta, const string &operation,
+                                             const DuckLakeRefInfo &target_ref, const DuckLakeSnapshot &target_snapshot,
+                                             idx_t source_snapshot_id, const SnapshotChangeInformation &source_delta,
+                                             const string &operation,
                                              const CherryPickCreatedObjects &created_by_range) {
 	if (HasCreatedSchemas(source_delta)) {
 		ValidateCherryPickCreatedCatalogRows(manager, source_ref, target_ref, target_snapshot, source_snapshot_id,
@@ -2133,12 +2123,11 @@ CREATE TEMP TABLE __ducklake_cherry_pick_cumulative_inlined_row_map(
 }
 
 static void CleanupCherryPickApplyMaps(DuckLakeMetadataManager &manager) {
-	auto cleanup = manager.Execute(
-	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_data_file_map; "
-	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_delete_file_map; "
-	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_data_file_map; "
-	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_delete_file_map; "
-	    "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_inlined_row_map;");
+	auto cleanup = manager.Execute("DROP TABLE IF EXISTS __ducklake_cherry_pick_data_file_map; "
+	                               "DROP TABLE IF EXISTS __ducklake_cherry_pick_delete_file_map; "
+	                               "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_data_file_map; "
+	                               "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_delete_file_map; "
+	                               "DROP TABLE IF EXISTS __ducklake_cherry_pick_cumulative_inlined_row_map;");
 	if (cleanup->HasError()) {
 		cleanup->GetErrorObject().Throw("Failed to clean up DuckLake cherry-pick temp tables: ");
 	}
@@ -2151,12 +2140,10 @@ struct InlinedTableApplyTarget {
 	string target_table_name;
 };
 
-static vector<InlinedTableApplyTarget> ResolveInlinedTablesForCherryPick(DuckLakeMetadataManager &manager,
-                                                                         const DuckLakeRefInfo &source_ref,
-                                                                         const DuckLakeRefInfo &target_ref,
-                                                                         const SnapshotChangeInformation &source_delta,
-                                                                         idx_t picked_id, bool shared_layout,
-                                                                         const string &operation) {
+static vector<InlinedTableApplyTarget>
+ResolveInlinedTablesForCherryPick(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
+                                  const DuckLakeRefInfo &target_ref, const SnapshotChangeInformation &source_delta,
+                                  idx_t picked_id, bool shared_layout, const string &operation) {
 	set<TableIndex> table_ids;
 	table_ids.insert(source_delta.tables_inserted_inlined.begin(), source_delta.tables_inserted_inlined.end());
 	table_ids.insert(source_delta.tables_deleted_inlined.begin(), source_delta.tables_deleted_inlined.end());
@@ -2246,7 +2233,8 @@ static void EnsureTargetInlinedTable(DuckLakeMetadataManager &manager, const Inl
 	if (shared_layout || target.source_table_name == target.target_table_name) {
 		return;
 	}
-	auto ensure = manager.Execute(StringUtil::Format(R"(
+	auto ensure = manager.Execute(
+	    StringUtil::Format(R"(
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s AS
 SELECT * FROM {METADATA_CATALOG}.%s WHERE 1 = 0;
 INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, schema_version, branch_id)
@@ -2256,11 +2244,9 @@ WHERE NOT EXISTS (
   WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu
 );
 )",
-	                                                 SQLIdentifier(target.target_table_name),
-	                                                 SQLIdentifier(target.source_table_name), target.table_id,
-	                                                 SQLString(target.target_table_name), target.schema_version,
-	                                                 target_ref.ref_id, target.table_id, target.schema_version,
-	                                                 target_ref.ref_id));
+	                       SQLIdentifier(target.target_table_name), SQLIdentifier(target.source_table_name),
+	                       target.table_id, SQLString(target.target_table_name), target.schema_version,
+	                       target_ref.ref_id, target.table_id, target.schema_version, target_ref.ref_id));
 	if (ensure->HasError()) {
 		ensure->GetErrorObject().Throw(StringUtil::Format("Failed to ensure %s target inlined table: ", operation));
 	}
@@ -2286,8 +2272,8 @@ static InlinedCherryPickStats ApplyCherryPickInlinedData(DuckLakeMetadataManager
 		    shared_layout ? StringUtil::Format(" AND src.branch_id = %llu", source_ref.ref_id) : string();
 		string target_branch_select =
 		    shared_layout ? StringUtil::Format(", CAST(%llu AS BIGINT) AS branch_id", target_ref.ref_id) : string();
-		string exclude_cols = shared_layout ? "row_id, begin_snapshot, end_snapshot, branch_id"
-		                                    : "row_id, begin_snapshot, end_snapshot";
+		string exclude_cols =
+		    shared_layout ? "row_id, begin_snapshot, end_snapshot, branch_id" : "row_id, begin_snapshot, end_snapshot";
 
 		// Allocate target row_ids and record old→new mapping for later deletes in this transplant range.
 		auto map_insert = manager.Execute(StringUtil::Format(R"(
@@ -2328,7 +2314,8 @@ WHERE src.end_snapshot = %llu AND src.begin_snapshot <> %llu%s
 			}
 		}
 
-		auto copy_inserts = manager.Execute(StringUtil::Format(R"(
+		auto copy_inserts = manager.Execute(StringUtil::Format(
+		    R"(
 INSERT INTO {METADATA_CATALOG}.%s
 SELECT map.new_row_id AS row_id,
        CAST(%llu AS BIGINT) AS begin_snapshot,
@@ -2340,13 +2327,10 @@ JOIN __ducklake_cherry_pick_cumulative_inlined_row_map map
   ON map.table_id = %llu AND map.old_row_id = src.row_id
 WHERE src.begin_snapshot = %llu%s;
 )",
-		                                                       SQLIdentifier(target.target_table_name), new_head,
-		                                                       target_branch_select, exclude_cols,
-		                                                       SQLIdentifier(target.source_table_name),
-		                                                       target.table_id, picked_id, source_branch_filter));
+		    SQLIdentifier(target.target_table_name), new_head, target_branch_select, exclude_cols,
+		    SQLIdentifier(target.source_table_name), target.table_id, picked_id, source_branch_filter));
 		if (copy_inserts->HasError()) {
-			copy_inserts->GetErrorObject().Throw(
-			    StringUtil::Format("Failed to copy %s inlined inserts: ", operation));
+			copy_inserts->GetErrorObject().Throw(StringUtil::Format("Failed to copy %s inlined inserts: ", operation));
 		}
 
 		// Apply inlined-row deletes: prefer remapped ids from this apply/transplant range; else same row_id
@@ -2355,7 +2339,8 @@ WHERE src.begin_snapshot = %llu%s;
 		    shared_layout ? StringUtil::Format(" AND target.branch_id = %llu", target_ref.ref_id) : string();
 		string source_delete_filter =
 		    shared_layout ? StringUtil::Format(" AND source.branch_id = %llu", source_ref.ref_id) : string();
-		auto apply_deletes = manager.Execute(StringUtil::Format(R"(
+		auto apply_deletes = manager.Execute(StringUtil::Format(
+		    R"(
 UPDATE {METADATA_CATALOG}.%s target
 SET end_snapshot = %llu
 FROM {METADATA_CATALOG}.%s source
@@ -2369,10 +2354,8 @@ WHERE source.end_snapshot = %llu
     OR (map.new_row_id IS NULL AND target.row_id = source.row_id)
   );
 )",
-		                                                        SQLIdentifier(target.target_table_name), new_head,
-		                                                        SQLIdentifier(target.source_table_name),
-		                                                        target.table_id, picked_id, picked_id,
-		                                                        source_delete_filter, target_branch_filter));
+		    SQLIdentifier(target.target_table_name), new_head, SQLIdentifier(target.source_table_name), target.table_id,
+		    picked_id, picked_id, source_delete_filter, target_branch_filter));
 		if (apply_deletes->HasError()) {
 			apply_deletes->GetErrorObject().Throw(
 			    StringUtil::Format("Failed to apply %s inlined deletes: ", operation));
@@ -2387,7 +2370,8 @@ WHERE source.end_snapshot = %llu
 		if (probe->HasError()) {
 			continue;
 		}
-		auto copy_file_dels = manager.Execute(StringUtil::Format(R"(
+		auto copy_file_dels =
+		    manager.Execute(StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.%s(file_id, row_id, begin_snapshot)
 SELECT COALESCE(datamap.new_data_file_id, prevmap.new_data_file_id, src.file_id),
        src.row_id,
@@ -2404,9 +2388,8 @@ WHERE src.begin_snapshot = %llu
       AND existing.begin_snapshot = %llu
   );
 )",
-		                                                         SQLIdentifier(delete_table), new_head,
-		                                                         SQLIdentifier(delete_table), picked_id,
-		                                                         SQLIdentifier(delete_table), new_head));
+		                                       SQLIdentifier(delete_table), new_head, SQLIdentifier(delete_table),
+		                                       picked_id, SQLIdentifier(delete_table), new_head));
 		if (copy_file_dels->HasError()) {
 			copy_file_dels->GetErrorObject().Throw(
 			    StringUtil::Format("Failed to copy %s inlined file deletes: ", operation));
@@ -2506,9 +2489,11 @@ static void ApplyEndDateOrTombstone(DuckLakeMetadataManager &manager, const Duck
 	           what);
 }
 
-static void CopyInlinedRegistrationsForSchemaVersions(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
-                                                      const DuckLakeRefInfo &target_ref, const DuckLakeSnapshot &snapshot,
-                                                      idx_t table_id, idx_t table_schema_version, bool shared_layout,
+static void CopyInlinedRegistrationsForSchemaVersions(DuckLakeMetadataManager &manager,
+                                                      const DuckLakeRefInfo &source_ref,
+                                                      const DuckLakeRefInfo &target_ref,
+                                                      const DuckLakeSnapshot &snapshot, idx_t table_id,
+                                                      idx_t table_schema_version, bool shared_layout,
                                                       const string &operation) {
 	auto regs = manager.Query(StringUtil::Format(R"(
 SELECT table_name, schema_version
@@ -2522,11 +2507,12 @@ WHERE table_id = %llu AND branch_id = %llu AND schema_version = %llu
 	for (auto &reg_row : *regs) {
 		auto source_name = reg_row.GetValue<string>(0);
 		auto schema_version = reg_row.GetValue<idx_t>(1);
-		string target_name =
-		    shared_layout ? source_name
-		                  : DuckLakeMetadataManager::InlinedTableNameFor(table_id, schema_version, target_ref.ref_id,
-		                                                                false);
-		auto ensure = manager.Execute(snapshot, StringUtil::Format(R"(
+		string target_name = shared_layout ? source_name
+		                                   : DuckLakeMetadataManager::InlinedTableNameFor(table_id, schema_version,
+		                                                                                  target_ref.ref_id, false);
+		auto ensure = manager.Execute(
+		    snapshot,
+		    StringUtil::Format(R"(
 CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s AS
 SELECT * FROM {METADATA_CATALOG}.%s WHERE 1 = 0;
 INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, schema_version, branch_id)
@@ -2536,10 +2522,8 @@ WHERE NOT EXISTS (
   WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu
 );
 )",
-		                                                       SQLIdentifier(target_name), SQLIdentifier(source_name),
-		                                                       table_id, SQLString(target_name), schema_version,
-		                                                       target_ref.ref_id, table_id, schema_version,
-		                                                       target_ref.ref_id));
+		                       SQLIdentifier(target_name), SQLIdentifier(source_name), table_id, SQLString(target_name),
+		                       schema_version, target_ref.ref_id, table_id, schema_version, target_ref.ref_id));
 		if (ensure->HasError()) {
 			ensure->GetErrorObject().Throw(StringUtil::Format("Failed to register %s inlined table: ", operation));
 		}
@@ -2556,7 +2540,7 @@ FROM {METADATA_CATALOG}.ducklake_schema
 WHERE branch_id = %llu AND begin_snapshot = %llu
 ORDER BY schema_id
 )",
-	                                              source_ref.ref_id, picked_id));
+	                                                source_ref.ref_id, picked_id));
 	if (created->HasError()) {
 		created->GetErrorObject().Throw(StringUtil::Format("Failed to list %s created schemas: ", operation));
 	}
@@ -2572,14 +2556,15 @@ ORDER BY schema_id
 	if (id_list.empty()) {
 		return stats;
 	}
-	ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+	ExecuteDDL(manager, snapshot,
+	           StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_schema(
     schema_id, schema_uuid, begin_snapshot, end_snapshot, schema_name, path, path_is_relative, branch_id)
 SELECT schema_id, schema_uuid, {SNAPSHOT_ID}, NULL, schema_name, path, path_is_relative, {BRANCH_ID}
 FROM {METADATA_CATALOG}.ducklake_schema
 WHERE branch_id = %llu AND begin_snapshot = %llu;
 )",
-	                                               source_ref.ref_id, picked_id),
+	                              source_ref.ref_id, picked_id),
 	           operation, "created schemas");
 	return stats;
 }
@@ -2633,10 +2618,11 @@ ORDER BY t.table_id
 	for (auto &entry : created_tables) {
 		created_table_ids.insert(entry.first);
 	}
-	ApplyEndDateOrTombstone(manager, snapshot, "ducklake_table", "table_id", IdSetToList(created_table_ids),
-	                        operation, "created table rewrites");
+	ApplyEndDateOrTombstone(manager, snapshot, "ducklake_table", "table_id", IdSetToList(created_table_ids), operation,
+	                        "created table rewrites");
 
-	auto copy_tables = manager.Execute(snapshot, StringUtil::Format(R"(
+	auto copy_tables =
+	    manager.Execute(snapshot, StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_table(
     table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative, branch_id)
 SELECT table_id, table_uuid, {SNAPSHOT_ID}, NULL, schema_id, table_name, path, path_is_relative, {BRANCH_ID}
@@ -2672,8 +2658,8 @@ WHERE c.branch_id = %llu AND c.begin_snapshot = %llu
     WHERE stats.table_id = c.table_id AND stats.column_id = c.column_id AND stats.branch_id = {BRANCH_ID}
   );
 )",
-	                                                       source_ref.ref_id, picked_id, source_ref.ref_id, picked_id,
-	                                                       source_ref.ref_id, picked_id, source_ref.ref_id, picked_id));
+	                                                 source_ref.ref_id, picked_id, source_ref.ref_id, picked_id,
+	                                                 source_ref.ref_id, picked_id, source_ref.ref_id, picked_id));
 	if (copy_tables->HasError()) {
 		copy_tables->GetErrorObject().Throw(StringUtil::Format("Failed to copy %s created tables: ", operation));
 	}
@@ -2689,8 +2675,8 @@ WHERE NOT EXISTS (
   WHERE sv.table_id = %llu AND sv.schema_version = %llu AND sv.branch_id = {BRANCH_ID}
 );
 )",
-		                                                           table_schema_version, table_id, table_id,
-		                                                           table_schema_version));
+		                                                                    table_schema_version, table_id, table_id,
+		                                                                    table_schema_version));
 		if (schema_versions->HasError()) {
 			schema_versions->GetErrorObject().Throw(
 			    StringUtil::Format("Failed to copy %s schema_versions: ", operation));
@@ -2713,7 +2699,7 @@ FROM {METADATA_CATALOG}.ducklake_view
 WHERE branch_id = %llu AND begin_snapshot = %llu
 ORDER BY view_id
 )",
-	                                              source_ref.ref_id, picked_id));
+	                                                source_ref.ref_id, picked_id));
 	if (created->HasError()) {
 		created->GetErrorObject().Throw(StringUtil::Format("Failed to list %s created views: ", operation));
 	}
@@ -2724,12 +2710,12 @@ ORDER BY view_id
 		stats.max_catalog_id = MaxValue<idx_t>(stats.max_catalog_id, view_id + 1);
 	}
 	auto id_list = IdSetToList(ids);
-	ApplyEndDateOrTombstone(manager, snapshot, "ducklake_view", "view_id", id_list, operation,
-	                        "created view rewrites");
+	ApplyEndDateOrTombstone(manager, snapshot, "ducklake_view", "view_id", id_list, operation, "created view rewrites");
 	if (id_list.empty()) {
 		return stats;
 	}
-	ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+	ExecuteDDL(manager, snapshot,
+	           StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_view(
     view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases, branch_id)
 SELECT view_id, view_uuid, {SNAPSHOT_ID}, NULL, schema_id, view_name, dialect, sql, column_aliases, {BRANCH_ID}
@@ -2746,8 +2732,7 @@ SELECT view_id, column_name, {SNAPSHOT_ID}, NULL, key, value
 FROM {METADATA_CATALOG}.ducklake_view_column_tag
 WHERE view_id IN (%s) AND begin_snapshot = %llu;
 )",
-	                                               source_ref.ref_id, picked_id, id_list, picked_id, id_list,
-	                                               picked_id),
+	                              source_ref.ref_id, picked_id, id_list, picked_id, id_list, picked_id),
 	           operation, "created views");
 	return stats;
 }
@@ -2762,7 +2747,7 @@ FROM {METADATA_CATALOG}.ducklake_macro
 WHERE branch_id = %llu AND begin_snapshot = %llu
 ORDER BY macro_id
 )",
-	                                              source_ref.ref_id, picked_id));
+	                                                source_ref.ref_id, picked_id));
 	if (created->HasError()) {
 		created->GetErrorObject().Throw(StringUtil::Format("Failed to list %s created macros: ", operation));
 	}
@@ -2778,7 +2763,8 @@ ORDER BY macro_id
 	if (id_list.empty()) {
 		return stats;
 	}
-	ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+	ExecuteDDL(manager, snapshot,
+	           StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_macro(schema_id, macro_id, macro_name, begin_snapshot, end_snapshot, branch_id)
 SELECT schema_id, macro_id, macro_name, {SNAPSHOT_ID}, NULL, {BRANCH_ID}
 FROM {METADATA_CATALOG}.ducklake_macro
@@ -2804,7 +2790,7 @@ WHERE macro_id IN (%s)
       AND existing.column_id = param.column_id
   );
 )",
-	                                               source_ref.ref_id, picked_id, id_list, id_list),
+	                              source_ref.ref_id, picked_id, id_list, id_list),
 	           operation, "created macros");
 	return stats;
 }
@@ -2829,8 +2815,8 @@ FROM {METADATA_CATALOG}.ducklake_deletion_column del
 WHERE del.branch_id = %llu AND del.deleted_at_snapshot = %llu
   AND CAST(FLOOR(del.object_id / 4294967296) AS BIGINT) IN (%s)
 )",
-	                                               source_ref.ref_id, picked_id, picked_id, table_list,
-	                                               source_ref.ref_id, picked_id, table_list));
+	                                                     source_ref.ref_id, picked_id, picked_id, table_list,
+	                                                     source_ref.ref_id, picked_id, table_list));
 	if (dropped_cols->HasError()) {
 		dropped_cols->GetErrorObject().Throw(StringUtil::Format("Failed to inspect %s dropped columns: ", operation));
 	}
@@ -2840,7 +2826,8 @@ WHERE del.branch_id = %llu AND del.deleted_at_snapshot = %llu
 	}
 	auto dropped_column_list = IdSetToList(dropped_column_object_ids);
 	if (!dropped_column_list.empty()) {
-		ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+		ExecuteDDL(manager, snapshot,
+		           StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_column
 SET end_snapshot = {SNAPSHOT_ID}
 WHERE end_snapshot IS NULL
@@ -2861,7 +2848,7 @@ WHERE col.end_snapshot IS NULL
       AND del.deleted_at_snapshot <= {SNAPSHOT_ID}
   );
 )",
-		                                               dropped_column_list, dropped_column_list),
+		                              dropped_column_list, dropped_column_list),
 		           operation, "dropped columns");
 	}
 
@@ -2870,7 +2857,7 @@ SELECT DISTINCT table_id, column_id
 FROM {METADATA_CATALOG}.ducklake_column
 WHERE branch_id = %llu AND begin_snapshot = %llu AND table_id IN (%s)
 )",
-	                                           source_ref.ref_id, picked_id, table_list));
+	                                                 source_ref.ref_id, picked_id, table_list));
 	if (new_cols->HasError()) {
 		new_cols->GetErrorObject().Throw(StringUtil::Format("Failed to inspect %s new columns: ", operation));
 	}
@@ -2882,7 +2869,8 @@ WHERE branch_id = %llu AND begin_snapshot = %llu AND table_id IN (%s)
 	}
 	auto rewritten_column_list = IdSetToList(rewritten_column_object_ids);
 	if (!rewritten_column_list.empty()) {
-		ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+		ExecuteDDL(manager, snapshot,
+		           StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_column
 SET end_snapshot = {SNAPSHOT_ID}
 WHERE end_snapshot IS NULL
@@ -2903,11 +2891,12 @@ WHERE col.end_snapshot IS NULL
       AND del.deleted_at_snapshot <= {SNAPSHOT_ID}
   );
 )",
-		                                               rewritten_column_list, rewritten_column_list),
+		                              rewritten_column_list, rewritten_column_list),
 		           operation, "rewritten columns");
 	}
 
-	ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+	ExecuteDDL(manager, snapshot,
+	           StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_column(
     column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type,
     initial_default, default_value, nulls_allowed, parent_column, default_value_type,
@@ -2933,8 +2922,8 @@ SELECT table_id, column_id, {SNAPSHOT_ID}, NULL, key, value
 FROM {METADATA_CATALOG}.ducklake_column_tag
 WHERE begin_snapshot = %llu AND table_id IN (%s);
 )",
-	                                           source_ref.ref_id, picked_id, table_list, source_ref.ref_id, picked_id,
-	                                           table_list, picked_id, table_list),
+	                              source_ref.ref_id, picked_id, table_list, source_ref.ref_id, picked_id, table_list,
+	                              picked_id, table_list),
 	           operation, "altered table columns");
 
 	auto schema_versions = manager.Query(StringUtil::Format(R"(
@@ -2943,7 +2932,7 @@ FROM {METADATA_CATALOG}.ducklake_schema_versions
 WHERE branch_id = %llu AND begin_snapshot = %llu AND table_id IN (%s)
 ORDER BY table_id, schema_version
 )",
-	                                                source_ref.ref_id, picked_id, table_list));
+	                                                        source_ref.ref_id, picked_id, table_list));
 	if (schema_versions->HasError()) {
 		schema_versions->GetErrorObject().Throw(StringUtil::Format("Failed to list %s schema versions: ", operation));
 	}
@@ -2951,7 +2940,8 @@ ORDER BY table_id, schema_version
 		auto table_id = row.GetValue<idx_t>(0);
 		auto schema_version = row.GetValue<idx_t>(1);
 		stats.max_schema_version = MaxValue<idx_t>(stats.max_schema_version, schema_version);
-		ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+		ExecuteDDL(manager, snapshot,
+		           StringUtil::Format(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_schema_versions(begin_snapshot, schema_version, table_id, branch_id)
 SELECT {SNAPSHOT_ID}, %llu, %llu, {BRANCH_ID}
 WHERE NOT EXISTS (
@@ -2959,7 +2949,7 @@ WHERE NOT EXISTS (
   WHERE sv.table_id = %llu AND sv.schema_version = %llu AND sv.branch_id = {BRANCH_ID}
 );
 )",
-		                                               schema_version, table_id, table_id, schema_version),
+		                              schema_version, table_id, table_id, schema_version),
 		           operation, "altered table schema version");
 		CopyInlinedRegistrationsForSchemaVersions(manager, source_ref, target_ref, snapshot, table_id, schema_version,
 		                                          shared_layout, operation);
@@ -2974,7 +2964,8 @@ static void ApplyCherryPickAlteredViews(DuckLakeMetadataManager &manager, const 
 		return;
 	}
 	auto view_list = IndexSetToList(source_delta.altered_views);
-	ExecuteDDL(manager, snapshot, StringUtil::Format(R"(
+	ExecuteDDL(manager, snapshot,
+	           StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_tag
 SET end_snapshot = {SNAPSHOT_ID}
 WHERE end_snapshot IS NULL
@@ -3001,8 +2992,8 @@ SELECT view_id, column_name, {SNAPSHOT_ID}, NULL, key, value
 FROM {METADATA_CATALOG}.ducklake_view_column_tag
 WHERE begin_snapshot = %llu AND view_id IN (%s);
 )",
-	                                           view_list, picked_id, view_list, picked_id, view_list, view_list,
-	                                           picked_id, view_list, picked_id, view_list),
+	                              view_list, picked_id, view_list, picked_id, view_list, view_list, picked_id,
+	                              view_list, picked_id, view_list),
 	           operation, "altered views");
 }
 
@@ -3019,14 +3010,12 @@ static void ApplyCherryPickDroppedObjects(DuckLakeMetadataManager &manager, cons
 	ExecuteDDL(manager, snapshot, DuckLakeMetadataManager::DropMacros(dropped_macros), operation, "dropped macros");
 }
 
-static CherryPickApplyResult ApplyCherryPickSnapshot(DuckLakeMetadataManager &manager,
-                                                     const DuckLakeRefInfo &source_ref,
-                                                     const DuckLakeRefInfo &target_ref,
-                                                     const DuckLakeSnapshotInfo &picked,
-                                                     const DuckLakeSnapshot &target_snapshot,
-                                                     const SnapshotChangeInformation &source_delta,
-                                                     const string &commit_message, const string &extra,
-                                                     const string &operation, bool shared_layout) {
+static CherryPickApplyResult
+ApplyCherryPickSnapshot(DuckLakeMetadataManager &manager, const DuckLakeRefInfo &source_ref,
+                        const DuckLakeRefInfo &target_ref, const DuckLakeSnapshotInfo &picked,
+                        const DuckLakeSnapshot &target_snapshot, const SnapshotChangeInformation &source_delta,
+                        const string &commit_message, const string &extra, const string &operation,
+                        bool shared_layout) {
 	auto count_q = manager.Query(StringUtil::Format(R"(
 SELECT
   (SELECT COUNT(*) FROM {METADATA_CATALOG}.ducklake_data_file
@@ -3036,7 +3025,7 @@ SELECT
   (SELECT COALESCE(MAX(data_file_id) + 1, 0) FROM {METADATA_CATALOG}.ducklake_data_file),
   (SELECT COALESCE(MAX(delete_file_id) + 1, 0) FROM {METADATA_CATALOG}.ducklake_delete_file)
 )",
-	                                                      source_ref.ref_id, picked.id, source_ref.ref_id, picked.id));
+	                                                source_ref.ref_id, picked.id, source_ref.ref_id, picked.id));
 	if (count_q->HasError()) {
 		count_q->GetErrorObject().Throw(StringUtil::Format("Failed to size %s file remapping: ", operation));
 	}
@@ -3076,7 +3065,8 @@ VALUES (%llu, %s, NULL, %s, %s);
 	    new_head, new_schema_version, new_next_catalog_id, new_next_file_id, target_ref.ref_id, new_head,
 	    SQLString(picked.change_info.changes_made), SQLString(commit_message), SQLString(extra)));
 	if (insert_snapshot->HasError()) {
-		insert_snapshot->GetErrorObject().Throw(StringUtil::Format("Failed to insert DuckLake %s snapshot: ", operation));
+		insert_snapshot->GetErrorObject().Throw(
+		    StringUtil::Format("Failed to insert DuckLake %s snapshot: ", operation));
 	}
 
 	auto apply_snapshot =
@@ -3120,8 +3110,8 @@ WHERE snapshot_id = %llu;
 )",
 		                                               new_schema_version, new_next_catalog_id, new_head));
 		if (bump->HasError()) {
-			bump->GetErrorObject().Throw(StringUtil::Format("Failed to bump DuckLake %s schema catalog ids: ",
-			                                                operation));
+			bump->GetErrorObject().Throw(
+			    StringUtil::Format("Failed to bump DuckLake %s schema catalog ids: ", operation));
 		}
 		apply_snapshot.schema_version = new_schema_version;
 		apply_snapshot.next_catalog_id = new_next_catalog_id;
@@ -3290,7 +3280,8 @@ WHERE source.branch_id = %llu
 		string delete_case = "0";
 		string next_case = "stats.next_row_id";
 		// next_row_id / record_count for inlined rows are applied in dedicated UPDATEs below.
-		auto stats = manager.Execute(StringUtil::Format(R"(
+		auto stats = manager.Execute(StringUtil::Format(
+		    R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_table_stats(table_id, record_count, next_row_id, file_size_bytes, branch_id)
 SELECT t.table_id, 0, 0, 0, %llu
 FROM (VALUES %s) AS t(table_id)
@@ -3326,12 +3317,9 @@ SET record_count = GREATEST(0, stats.record_count
 WHERE stats.branch_id = %llu
   AND stats.table_id IN (SELECT table_id FROM (VALUES %s) AS t(table_id));
 )",
-		                                                 target_ref.ref_id, table_values, target_ref.ref_id,
-		                                                 target_ref.ref_id, new_head, target_ref.ref_id, new_head,
-		                                                 target_ref.ref_id, new_head, insert_case, delete_case,
-		                                                 target_ref.ref_id, new_head, target_ref.ref_id, new_head,
-		                                                 target_ref.ref_id, new_head, next_case, target_ref.ref_id,
-		                                                 table_values));
+		    target_ref.ref_id, table_values, target_ref.ref_id, target_ref.ref_id, new_head, target_ref.ref_id,
+		    new_head, target_ref.ref_id, new_head, insert_case, delete_case, target_ref.ref_id, new_head,
+		    target_ref.ref_id, new_head, target_ref.ref_id, new_head, next_case, target_ref.ref_id, table_values));
 		if (stats->HasError()) {
 			stats->GetErrorObject().Throw(StringUtil::Format("Failed to update DuckLake %s table stats: ", operation));
 		}
@@ -3457,9 +3445,8 @@ static string SchemaUUIDForId(const map<SchemaIndex, string> &schemas, SchemaInd
 DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &source_branch, idx_t snapshot_id,
                                                              const string &target_branch, bool dry_run) {
 	if (!transaction.GetCatalog().SupportsWritableBranches()) {
-		throw InvalidInputException(
-		    "ducklake_cherry_pick requires DuckLake catalog version >= 1.1-dev3. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("ducklake_cherry_pick requires DuckLake catalog version >= 1.1-dev3. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	DuckLakeRefInfo source_ref;
 	DuckLakeRefInfo target_ref;
@@ -3514,21 +3501,21 @@ DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &sourc
 		result.cherry_pick_type = "conflicts";
 		result.messages = std::move(conflicts);
 		if (!dry_run) {
-			throw TransactionException("Cherry-pick conflict applying snapshot %llu from branch \"%s\" onto \"%s\":\n%s",
-			                           snapshot_id, source_branch, target_branch, StringUtil::Join(result.messages, "\n"));
+			throw TransactionException(
+			    "Cherry-pick conflict applying snapshot %llu from branch \"%s\" onto \"%s\":\n%s", snapshot_id,
+			    source_branch, target_branch, StringUtil::Join(result.messages, "\n"));
 		}
 		return result;
 	}
 
-	auto target_snapshot = ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "cherry-pick",
-	                                           "target head");
+	auto target_snapshot =
+	    ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "cherry-pick", "target head");
 	set<idx_t> source_data_files_created_by_range;
 	auto source_objects_created_by_range = ReadSourceObjectsCreatedAt(*this, source_ref, snapshot_id);
 	ValidateCherryPickCreatedObjects(*this, source_ref, target_ref, target_snapshot, snapshot_id, source_delta,
 	                                 "cherry-pick", source_objects_created_by_range);
 	ValidateCherryPickDependencies(*this, source_ref, target_ref, target_snapshot, snapshot_id, source_delta,
-	                               "cherry-pick", source_data_files_created_by_range,
-	                               source_objects_created_by_range);
+	                               "cherry-pick", source_data_files_created_by_range, source_objects_created_by_range);
 
 	result.messages.push_back(StringUtil::Format("Cherry-pick snapshot: %llu", snapshot_id));
 	result.messages.push_back(StringUtil::Format("Source branch: %s", source_ref.ref_name));
@@ -3541,8 +3528,8 @@ DuckLakeCherryPickResult DuckLakeMetadataManager::CherryPick(const string &sourc
 	}
 
 	PrepareCherryPickApplyMaps(*this);
-	string extra = StringUtil::Format("cherry_pick_source=%s,cherry_pick_snapshot=%llu", source_ref.ref_name,
-	                                  snapshot_id);
+	string extra =
+	    StringUtil::Format("cherry_pick_source=%s,cherry_pick_snapshot=%llu", source_ref.ref_name, snapshot_id);
 	bool shared_layout = transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	auto applied = ApplyCherryPickSnapshot(
 	    *this, source_ref, target_ref, picked, target_snapshot, source_delta,
@@ -3561,9 +3548,8 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
                                                              idx_t end_snapshot, const string &target_branch,
                                                              bool dry_run) {
 	if (!transaction.GetCatalog().SupportsWritableBranches()) {
-		throw InvalidInputException(
-		    "ducklake_transplant requires DuckLake catalog version >= 1.1-dev3. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("ducklake_transplant requires DuckLake catalog version >= 1.1-dev3. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	if (end_snapshot < start_snapshot) {
 		throw InvalidInputException("ducklake_transplant start_snapshot must be <= end_snapshot");
@@ -3599,9 +3585,9 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 	result.dry_run = dry_run;
 	result.ancestor_snapshot = GetMergeBaseSnapshot(source_ref.ref_id, target_ref.ref_id);
 
-	auto picked_snapshots = GetAllSnapshots(StringUtil::Format(
-	    "s.snapshot_id >= %llu AND s.snapshot_id <= %llu AND s.branch_id = %llu", start_snapshot, end_snapshot,
-	    source_ref.ref_id));
+	auto picked_snapshots =
+	    GetAllSnapshots(StringUtil::Format("s.snapshot_id >= %llu AND s.snapshot_id <= %llu AND s.branch_id = %llu",
+	                                       start_snapshot, end_snapshot, source_ref.ref_id));
 	if (picked_snapshots.empty()) {
 		throw InvalidInputException("No source-owned snapshots from branch \"%s\" in range [%llu, %llu]",
 		                            source_ref.ref_name, start_snapshot, end_snapshot);
@@ -3636,22 +3622,21 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 
 	auto target_delta = GetBranchChangesSince(target_ref.ref_id, result.ancestor_snapshot, target_ref.snapshot_id);
 	auto conflicts = DetectConflicts(source_delta, target_delta, ConflictReportStyle::MERGE);
-	AppendDeleteConflicts(*this, source_ref, target_ref, start_snapshot == 0 ? 0 : start_snapshot - 1,
-	                      end_snapshot, result.ancestor_snapshot, target_ref.snapshot_id, source_delta, target_delta,
-	                      conflicts);
+	AppendDeleteConflicts(*this, source_ref, target_ref, start_snapshot == 0 ? 0 : start_snapshot - 1, end_snapshot,
+	                      result.ancestor_snapshot, target_ref.snapshot_id, source_delta, target_delta, conflicts);
 	if (!conflicts.empty()) {
 		result.transplant_type = "conflicts";
 		result.messages = std::move(conflicts);
 		if (!dry_run) {
 			throw TransactionException(
-			    "Transplant conflict applying snapshots %llu..%llu from branch \"%s\" onto \"%s\":\n%s",
-			    start_snapshot, end_snapshot, source_branch, target_branch, StringUtil::Join(result.messages, "\n"));
+			    "Transplant conflict applying snapshots %llu..%llu from branch \"%s\" onto \"%s\":\n%s", start_snapshot,
+			    end_snapshot, source_branch, target_branch, StringUtil::Join(result.messages, "\n"));
 		}
 		return result;
 	}
 
-	auto target_snapshot = ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "transplant",
-	                                           "target head");
+	auto target_snapshot =
+	    ReadMetadataSnapshot(*this, target_ref.snapshot_id, target_ref.ref_id, "transplant", "target head");
 	set<idx_t> source_data_files_created_by_range;
 	CherryPickCreatedObjects source_objects_created_by_range;
 	for (idx_t i = 0; i < picked_snapshots.size(); i++) {
@@ -3696,9 +3681,8 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 		total_data_files += applied.data_file_count;
 		total_delete_files += applied.delete_file_count;
 		result.snapshots_applied++;
-		result.messages.push_back(
-		    StringUtil::Format("Applied source snapshot %llu as target snapshot %llu", picked.id,
-		                       applied.snapshot.snapshot_id));
+		result.messages.push_back(StringUtil::Format("Applied source snapshot %llu as target snapshot %llu", picked.id,
+		                                             applied.snapshot.snapshot_id));
 	}
 	CleanupCherryPickApplyMaps(*this);
 
@@ -3711,9 +3695,8 @@ DuckLakeTransplantResult DuckLakeMetadataManager::Transplant(const string &sourc
 
 vector<DuckLakeDiffResult> DuckLakeMetadataManager::DiffRefs(const string &ref_a, const string &ref_b) {
 	if (!transaction.GetCatalog().SupportsWritableBranches()) {
-		throw InvalidInputException(
-		    "ducklake_diff requires DuckLake catalog version >= 1.1-dev3. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("ducklake_diff requires DuckLake catalog version >= 1.1-dev3. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	DuckLakeRefInfo a_ref;
 	DuckLakeRefInfo b_ref;
@@ -3773,8 +3756,8 @@ vector<DuckLakeDiffResult> DuckLakeMetadataManager::DiffRefs(const string &ref_a
 		auto a_entry = a_schemas.find(entry.first);
 		if (a_entry != a_schemas.end() && a_entry->second->name != entry.second->name) {
 			add_result("schema", entry.second->name, entry.second->name, "altered",
-			           StringUtil::Format("renamed from %s to %s; uuid=%s", a_entry->second->name,
-			                              entry.second->name, entry.first));
+			           StringUtil::Format("renamed from %s to %s; uuid=%s", a_entry->second->name, entry.second->name,
+			                              entry.first));
 		}
 	}
 
@@ -3815,8 +3798,7 @@ vector<DuckLakeDiffResult> DuckLakeMetadataManager::DiffRefs(const string &ref_a
 		auto b_columns = ColumnSignature(b_table->columns);
 		vector<string> details;
 		if (a_table->name != b_table->name || a_schema_uuid != b_schema_uuid) {
-			details.push_back(StringUtil::Format("renamed/moved from %s to %s",
-			                                     JoinName(a_schema_name, a_table->name),
+			details.push_back(StringUtil::Format("renamed/moved from %s to %s", JoinName(a_schema_name, a_table->name),
 			                                     JoinName(b_schema_name, b_table->name)));
 		}
 		if (a_columns != b_columns) {
@@ -3863,8 +3845,7 @@ vector<DuckLakeDiffResult> DuckLakeMetadataManager::DiffRefs(const string &ref_a
 		auto b_schema_uuid = SchemaUUIDForId(b_schema_uuids, b_view->schema_id);
 		vector<string> details;
 		if (a_view->name != b_view->name || a_schema_uuid != b_schema_uuid) {
-			details.push_back(StringUtil::Format("renamed/moved from %s to %s",
-			                                     JoinName(a_schema_name, a_view->name),
+			details.push_back(StringUtil::Format("renamed/moved from %s to %s", JoinName(a_schema_name, a_view->name),
 			                                     JoinName(b_schema_name, b_view->name)));
 		}
 		if (a_view->dialect != b_view->dialect || a_view->sql != b_view->sql ||
@@ -3910,9 +3891,8 @@ static string ConversionTempTableName(idx_t table_id, idx_t schema_version) {
 DuckLakeConvertInliningLayoutResult DuckLakeMetadataManager::ConvertInliningLayout(const string &target_layout_p,
                                                                                    bool dry_run) {
 	if (!transaction.GetCatalog().SupportsWritableBranches()) {
-		throw InvalidInputException(
-		    "ducklake_convert_inlining_layout requires DuckLake catalog version >= 1.1-dev3. "
-		    "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
+		throw InvalidInputException("ducklake_convert_inlining_layout requires DuckLake catalog version >= 1.1-dev3. "
+		                            "Re-ATTACH with AUTOMATIC_MIGRATION TRUE to upgrade.");
 	}
 	auto target_layout = NormalizeInliningLayout(target_layout_p);
 	auto source_layout = transaction.GetCatalog().GetInliningLayout();
@@ -3935,8 +3915,8 @@ ORDER BY table_id, schema_version, branch_id, table_name
 	}
 	vector<InlinedLayoutRegistration> registrations;
 	for (auto &row : *registrations_result) {
-		registrations.push_back({row.GetValue<idx_t>(0), row.GetValue<string>(1), row.GetValue<idx_t>(2),
-		                         row.GetValue<idx_t>(3)});
+		registrations.push_back(
+		    {row.GetValue<idx_t>(0), row.GetValue<string>(1), row.GetValue<idx_t>(2), row.GetValue<idx_t>(3)});
 	}
 
 	string sql;
@@ -3948,9 +3928,8 @@ ORDER BY table_id, schema_version, branch_id, table_name
 		for (auto &reg : registrations) {
 			set<idx_t> branch_ids;
 			branch_ids.insert(reg.branch_id);
-			auto branch_result =
-			    Query(StringUtil::Format("SELECT DISTINCT branch_id FROM {METADATA_CATALOG}.%s",
-			                             SQLIdentifier(reg.table_name)));
+			auto branch_result = Query(StringUtil::Format("SELECT DISTINCT branch_id FROM {METADATA_CATALOG}.%s",
+			                                              SQLIdentifier(reg.table_name)));
 			if (branch_result->HasError()) {
 				branch_result->GetErrorObject().Throw("Failed to read shared inlined-data table branches: ");
 			}
@@ -3966,9 +3945,9 @@ ORDER BY table_id, schema_version, branch_id, table_name
 				}
 				auto target_key = StringUtil::Format("%llu:%llu:%llu", reg.table_id, reg.schema_version, branch_id);
 				if (copied_targets.insert(target_key).second) {
-					auto count_result = Query(StringUtil::Format(
-					    "SELECT COUNT(*) FROM {METADATA_CATALOG}.%s WHERE branch_id = %llu",
-					    SQLIdentifier(reg.table_name), branch_id));
+					auto count_result =
+					    Query(StringUtil::Format("SELECT COUNT(*) FROM {METADATA_CATALOG}.%s WHERE branch_id = %llu",
+					                             SQLIdentifier(reg.table_name), branch_id));
 					if (count_result->HasError()) {
 						count_result->GetErrorObject().Throw("Failed to count shared inlined-data rows: ");
 					}
@@ -4001,8 +3980,8 @@ WHERE NOT EXISTS (
 			}
 			if (dropped_sources.insert(reg.table_name).second) {
 				result.messages.push_back(StringUtil::Format("drop shared physical table %s", reg.table_name));
-				sql += StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;\n",
-				                          SQLIdentifier(reg.table_name));
+				sql +=
+				    StringUtil::Format("DROP TABLE IF EXISTS {METADATA_CATALOG}.%s;\n", SQLIdentifier(reg.table_name));
 				auto temp_entry = shared_main_temps.find(reg.table_name);
 				if (temp_entry != shared_main_temps.end()) {
 					sql += StringUtil::Format("ALTER TABLE {METADATA_CATALOG}.%s RENAME TO %s;\n",
@@ -4034,9 +4013,8 @@ WHERE 1 = 0;
 )",
 			                          SQLIdentifier(temp_name), regs[0].branch_id, SQLIdentifier(regs[0].table_name));
 			for (auto &reg : regs) {
-				auto count_result =
-				    Query(StringUtil::Format("SELECT COUNT(*) FROM {METADATA_CATALOG}.%s",
-				                             SQLIdentifier(reg.table_name)));
+				auto count_result = Query(
+				    StringUtil::Format("SELECT COUNT(*) FROM {METADATA_CATALOG}.%s", SQLIdentifier(reg.table_name)));
 				if (count_result->HasError()) {
 					count_result->GetErrorObject().Throw("Failed to count per-branch inlined-data rows: ");
 				}
@@ -4066,8 +4044,8 @@ WHERE table_id = %llu AND schema_version = %llu AND branch_id = %llu;
 		throw InternalException("Unsupported inlining_layout conversion from %s to %s", source_layout, target_layout);
 	}
 
-	result.messages.push_back(StringUtil::Format("%s set inlining_layout to %s",
-	                                             dry_run ? "would" : "will", target_layout));
+	result.messages.push_back(
+	    StringUtil::Format("%s set inlining_layout to %s", dry_run ? "would" : "will", target_layout));
 	if (dry_run) {
 		return result;
 	}
@@ -4090,7 +4068,7 @@ WHERE NOT EXISTS (
   SELECT 1 FROM {METADATA_CATALOG}.ducklake_metadata WHERE key = 'inlining_layout' AND scope IS NULL
 );
 )",
-	                                             SQLString(target_layout), SQLString(target_layout)));
+	                                                SQLString(target_layout), SQLString(target_layout)));
 	if (config_result->HasError()) {
 		config_result->GetErrorObject().Throw("Failed to update inlining_layout option in DuckLake: ");
 	}
@@ -4272,7 +4250,8 @@ idx_t DuckLakeMetadataManager::GetEffectiveInlinedReadSnapshot(DuckLakeSnapshot 
 		return snapshot.snapshot_id;
 	}
 	// Cap visibility of ancestor-owned inlined rows at the fork point (max_visible_snapshot).
-	auto result = Query(snapshot, StringUtil::Format(R"(
+	auto result =
+	    Query(snapshot, StringUtil::Format(R"(
 SELECT LEAST(%llu::BIGINT, COALESCE(bl.max_visible_snapshot, %llu::BIGINT))
 FROM {METADATA_CATALOG}.ducklake_inlined_data_tables idt
 LEFT JOIN {METADATA_CATALOG}.ducklake_branch_lineage bl
@@ -4280,8 +4259,7 @@ LEFT JOIN {METADATA_CATALOG}.ducklake_branch_lineage bl
 WHERE idt.table_name = %s
 LIMIT 1;
 )",
-	                                                 snapshot.snapshot_id, snapshot.snapshot_id,
-	                                                 SQLString(inlined_table_name)));
+	                                       snapshot.snapshot_id, snapshot.snapshot_id, SQLString(inlined_table_name)));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to resolve effective inlined-data snapshot in DuckLake: ");
 	}
@@ -4358,8 +4336,8 @@ WHERE {SNAPSHOT_ID} >= begin_snapshot
 }
 
 idx_t DuckLakeMetadataManager::GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot) {
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_snapshot = snapshot;
 	if (!shared_layout) {
 		read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
@@ -5661,8 +5639,7 @@ vector<DuckLakeFileListEntry> DuckLakeMetadataManager::GetTableInsertions(DuckLa
 	// Files either match the exact snapshot range
 	// Or they have partial_max set, which means they are a file with many snapshot ids, and might contain
 	// the snapshot we need
-	auto query =
-	    StringUtil::Format(R"(
+	auto query = StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.ducklake_data_file data, (
 	SELECT
@@ -5678,8 +5655,8 @@ WHERE data.table_id=%d AND data.begin_snapshot <= {SNAPSHOT_ID} AND (
 	(data.partial_max IS NOT NULL AND data.partial_max >= %d)
 )%s;
 		)",
-	                       select_list, table_id.index, start_snapshot.snapshot_id, start_snapshot.snapshot_id,
-	                       branch_filter);
+	                                select_list, table_id.index, start_snapshot.snapshot_id, start_snapshot.snapshot_id,
+	                                branch_filter);
 
 	auto result = Query(end_snapshot, query);
 	if (result->HasError()) {
@@ -5861,7 +5838,6 @@ USING (data_file_id), (
 )",
 		                            select_list, start_snapshot.snapshot_id, table_id.index, table_id.index);
 	}
-
 
 	if (has_inlined_table) {
 		string null_file_cols = "CAST(NULL AS VARCHAR) AS path, CAST(NULL AS BOOLEAN) AS path_is_relative, CAST(NULL "
@@ -6458,17 +6434,15 @@ void DuckLakeMetadataManager::ExpandBranchAwarePlaceholders(string &query, bool 
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN}", ColumnLineageIntervalVisibility("col"));
 		query = StringUtil::Replace(query, "{VISIBLE_VIEW}",
 		                            LineageIntervalVisibility("view", "view_id", "ducklake_deletion_view"));
-		query = StringUtil::Replace(
-		    query, "{VISIBLE_MACRO}",
-		    LineageIntervalVisibility("ducklake_macro", "macro_id", "ducklake_deletion_macro"));
+		query = StringUtil::Replace(query, "{VISIBLE_MACRO}",
+		                            LineageIntervalVisibility("ducklake_macro", "macro_id", "ducklake_deletion_macro"));
 		query = StringUtil::Replace(query, "{VISIBLE_PARTITION}",
 		                            LineageIntervalVisibility("part", "partition_id", "ducklake_deletion_partition"));
 		query = StringUtil::Replace(query, "{VISIBLE_SORT}", LineageIntervalVisibility("sort", "", ""));
 		query = StringUtil::Replace(query, "{VISIBLE_DATA_FILE}",
 		                            LineageIntervalVisibility("data", "data_file_id", "ducklake_deletion_data_file"));
-		query = StringUtil::Replace(
-		    query, "{VISIBLE_DELETE_FILE}",
-		    LineageIntervalVisibility("df", "delete_file_id", "ducklake_deletion_delete_file"));
+		query = StringUtil::Replace(query, "{VISIBLE_DELETE_FILE}",
+		                            LineageIntervalVisibility("df", "delete_file_id", "ducklake_deletion_delete_file"));
 		query = StringUtil::Replace(query, "{VISIBLE_TAG}", ClassicIntervalVisibility("tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_COLUMN_TAG}", ClassicIntervalVisibility("col_tag"));
 		query = StringUtil::Replace(query, "{VISIBLE_VIEW_COLUMN_TAG}", ClassicIntervalVisibility("vct"));
@@ -6678,11 +6652,10 @@ static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex ta
 	auto column_id = column.id.index;
 	auto column_order = column_id;
 
-	result += StringUtil::Format("(%d, {SNAPSHOT_ID}, NULL, %d, %d, %s, %s, %s, %s, %s, %s, %s, %s{BRANCH_ID_VAL})",
-	                             column_id, table_id.index, column_order, SQLString(column.name),
-	                             SQLString(column.type), initial_default_val, default_val,
-	                             column.nulls_allowed ? "true" : "false", parent_idx, default_val_type,
-	                             default_val_system);
+	result += StringUtil::Format(
+	    "(%d, {SNAPSHOT_ID}, NULL, %d, %d, %s, %s, %s, %s, %s, %s, %s, %s{BRANCH_ID_VAL})", column_id, table_id.index,
+	    column_order, SQLString(column.name), SQLString(column.type), initial_default_val, default_val,
+	    column.nulls_allowed ? "true" : "false", parent_idx, default_val_type, default_val_system);
 	for (auto &child : column.children) {
 		ColumnToSQLRecursive(child, table_id, column_id, result);
 	}
@@ -6732,7 +6705,7 @@ string DuckLakeMetadataManager::InlinedTableNameFor(idx_t table_id, idx_t schema
 }
 
 string DuckLakeMetadataManager::InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id,
-                                                   bool shared_layout) {
+                                                    bool shared_layout) {
 	if (shared_layout || branch_id == 0) {
 		return InlinedTableNameFor(table_id, schema_version);
 	}
@@ -6755,12 +6728,11 @@ string DuckLakeMetadataManager::InlinedTableRegistrationTuple(idx_t table_id, co
 
 string DuckLakeMetadataManager::LatestInlinedTableQuery(idx_t table_id, bool shared_layout) {
 	auto branch_filter = shared_layout ? "" : "{BRANCH_STATS_FILTER}";
-	return StringUtil::Format(
-	    "SELECT table_name, schema_version FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
-	    "WHERE table_id = %d%s AND schema_version = ("
-	    "  SELECT MAX(schema_version) FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
-	    "  WHERE table_id = %d%s)",
-	    table_id, branch_filter, table_id, branch_filter);
+	return StringUtil::Format("SELECT table_name, schema_version FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
+	                          "WHERE table_id = %d%s AND schema_version = ("
+	                          "  SELECT MAX(schema_version) FROM {METADATA_CATALOG}.ducklake_inlined_data_tables "
+	                          "  WHERE table_id = %d%s)",
+	                          table_id, branch_filter, table_id, branch_filter);
 }
 
 string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &table, const string &table_name) {
@@ -6870,10 +6842,10 @@ string DuckLakeMetadataManager::WriteNewInlinedTables(DuckLakeSnapshot commit_sn
 	}
 	string batch_query;
 	// Batch both INSERT queries into a single multi-statement query to reduce round-trips
-	batch_query +=
-	    "INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, schema_version{BRANCH_ID_COL}) "
-	    "VALUES " +
-	    inlined_tables + ";";
+	batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, "
+	               "schema_version{BRANCH_ID_COL}) "
+	               "VALUES " +
+	               inlined_tables + ";";
 	batch_query += inlined_table_queries;
 	return batch_query;
 }
@@ -6967,10 +6939,10 @@ string DuckLakeMetadataManager::WriteNewViews(const vector<DuckLakeViewInfo> &ne
 			view_insert_sql += ", ";
 		}
 		auto schema_id = view.schema_id.index;
-		view_insert_sql += StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %s{BRANCH_ID_VAL})",
-		                                      view.id.index, view.uuid, schema_id, SQLString(view.name),
-		                                      SQLString(view.dialect), SQLString(view.sql),
-		                                      SQLString(DuckLakeUtil::ToQuotedList(view.column_aliases)));
+		view_insert_sql +=
+		    StringUtil::Format("(%d, '%s', {SNAPSHOT_ID}, NULL, %d, %s, %s, %s, %s{BRANCH_ID_VAL})", view.id.index,
+		                       view.uuid, schema_id, SQLString(view.name), SQLString(view.dialect), SQLString(view.sql),
+		                       SQLString(DuckLakeUtil::ToQuotedList(view.column_aliases)));
 	}
 	if (!view_insert_sql.empty()) {
 		// insert table entries
@@ -6998,7 +6970,7 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 		for (auto &inlined_table : new_inlined_data_tables_result) {
 			if (inlined_table.id == entry.table_id) {
 				inlined_table_name = InlinedTableNameFor(inlined_table.id.index, commit_snapshot.schema_version,
-				                                        commit_snapshot.branch_id, shared_layout);
+				                                         commit_snapshot.branch_id, shared_layout);
 			}
 		}
 		if (inlined_table_name.empty()) {
@@ -7046,10 +7018,9 @@ string DuckLakeMetadataManager::WriteNewInlinedData(DuckLakeSnapshot &commit_sna
 			commit_snapshot.schema_version++;
 			inlined_table_name =
 			    GetInlinedTableQueries(commit_snapshot, table_info, inlined_tables, inlined_table_queries);
-			batch_query +=
-			    "INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, "
-			    "schema_version{BRANCH_ID_COL}) VALUES " +
-			    inlined_tables + ";";
+			batch_query += "INSERT INTO {METADATA_CATALOG}.ducklake_inlined_data_tables(table_id, table_name, "
+			               "schema_version{BRANCH_ID_COL}) VALUES " +
+			               inlined_tables + ";";
 			batch_query += inlined_table_queries;
 		}
 
@@ -7360,21 +7331,22 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedData(DuckLakeSnapsho
                                                                  const string &inlined_table_name,
                                                                  const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	// Cap at lineage max_visible so post-fork ancestor inserts stay hidden on child branches.
 	DuckLakeSnapshot read_snapshot = snapshot;
 	if (!shared_layout) {
 		read_snapshot.snapshot_id = GetEffectiveInlinedReadSnapshot(snapshot, inlined_table_name);
 	}
 	auto shared_filter = shared_layout ? " AND " + SharedInlinedVisibilityPredicate("inlined_data") : "";
-	auto result = Query(read_snapshot, StringUtil::Format(R"(
+	auto result =
+	    Query(read_snapshot, StringUtil::Format(R"(
 SELECT %s
 FROM {METADATA_CATALOG}.%s inlined_data
 WHERE {SNAPSHOT_ID} >= begin_snapshot AND ({SNAPSHOT_ID} < end_snapshot OR end_snapshot IS NULL)
 %s
 ORDER BY row_id;)",
-	                                                      projection, SQLIdentifier(inlined_table_name), shared_filter));
+	                                            projection, SQLIdentifier(inlined_table_name), shared_filter));
 	return result;
 }
 
@@ -7383,8 +7355,8 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedDataInsertions(DuckL
                                                                            const string &inlined_table_name,
                                                                            const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_end = end_snapshot;
 	if (!shared_layout) {
 		read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
@@ -7405,8 +7377,8 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadInlinedDataDeletions(DuckLa
                                                                           const string &inlined_table_name,
                                                                           const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	DuckLakeSnapshot read_end = end_snapshot;
 	if (!shared_layout) {
 		read_end.snapshot_id = GetEffectiveInlinedReadSnapshot(end_snapshot, inlined_table_name);
@@ -7426,8 +7398,8 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ReadAllInlinedDataForFlush(Duck
                                                                             const string &inlined_table_name,
                                                                             const vector<string> &columns_to_read) {
 	auto projection = GetProjection(columns_to_read);
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	auto shared_filter = shared_layout ? " AND branch_id = {BRANCH_ID}" : "";
 	auto result = Query(snapshot, StringUtil::Format(R"(
 SELECT %s
@@ -8397,9 +8369,8 @@ string DuckLakeMetadataManager::GetSnapshotAndStatsAndChangesQuery(bool filter_b
 	string changes_filter = "c.snapshot_id > {SNAPSHOT_ID}";
 	string stats_filter;
 	if (filter_by_branch) {
-		changes_filter +=
-		    " AND c.snapshot_id IN (SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_snapshot WHERE "
-		    "branch_id = {BRANCH_ID})";
+		changes_filter += " AND c.snapshot_id IN (SELECT snapshot_id FROM {METADATA_CATALOG}.ducklake_snapshot WHERE "
+		                  "branch_id = {BRANCH_ID})";
 		stats_filter = " AND ducklake_table_stats.branch_id = {BRANCH_ID}";
 	}
 	return StringUtil::Format(R"(
@@ -8979,10 +8950,10 @@ string DuckLakeMetadataManager::UpdateGlobalTableStatsSql(const DuckLakeGlobalSt
 			    "(%d, %d, %s, %s, %s, %s, %s{BRANCH_ID_VAL})", stats.table_id.index, col_stats.column_id.index,
 			    sql.contains_null, sql.contains_nan, sql.min_val, sql.max_val, sql.extra_stats);
 		}
-		batch_query += StringUtil::Format(
-		    "INSERT INTO {METADATA_CATALOG}.ducklake_table_stats(table_id, record_count, "
-		    "next_row_id, file_size_bytes{BRANCH_ID_COL}) VALUES (%d, %d, %d, %d{BRANCH_ID_VAL});",
-		    stats.table_id.index, stats.record_count, stats.next_row_id, stats.table_size_bytes);
+		batch_query +=
+		    StringUtil::Format("INSERT INTO {METADATA_CATALOG}.ducklake_table_stats(table_id, record_count, "
+		                       "next_row_id, file_size_bytes{BRANCH_ID_COL}) VALUES (%d, %d, %d, %d{BRANCH_ID_VAL});",
+		                       stats.table_id.index, stats.record_count, stats.next_row_id, stats.table_size_bytes);
 		batch_query += StringUtil::Format(
 		    "INSERT INTO {METADATA_CATALOG}.ducklake_table_column_stats(table_id, column_id, contains_null, "
 		    "contains_nan, min_value, max_value, extra_stats{BRANCH_ID_COL}) VALUES %s;",
@@ -9340,7 +9311,8 @@ string DuckLakeMetadataManager::WriteDeleteRewrites(const vector<DuckLakeCompact
 		auto snap = table_idx_last_snapshot[compaction.table_index.index];
 		if (compaction.delete_file_id.IsValid() && !compaction.delete_file_end_snapshot.IsValid()) {
 			// Own delete files: end-date. Inherited: tombstone.
-			batch_query += StringUtil::Format(R"(
+			batch_query +=
+			    StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_delete_file SET end_snapshot = %llu
 WHERE delete_file_id = %llu AND branch_id = {BRANCH_ID};
 INSERT INTO {METADATA_CATALOG}.ducklake_deletion_delete_file
@@ -9354,8 +9326,7 @@ WHERE df.delete_file_id = %llu AND df.branch_id != {BRANCH_ID} AND df.end_snapsh
       AND d.object_id = df.delete_file_id AND d.deleted_at_snapshot <= %llu
   );
 )",
-			                                  snap, compaction.delete_file_id.index, snap,
-			                                  compaction.delete_file_id.index, snap);
+			                       snap, compaction.delete_file_id.index, snap, compaction.delete_file_id.index, snap);
 		}
 		// Own data files: end-date. Inherited: tombstone (never end-date ancestor rows).
 		batch_query += StringUtil::Format(R"(
@@ -9374,12 +9345,11 @@ WHERE df.data_file_id = %llu AND df.branch_id != {BRANCH_ID} AND df.end_snapshot
 )",
 		                                  snap, compaction.source_id.index, snap, compaction.source_id.index, snap);
 		if (compaction.new_id.IsValid()) {
-			batch_query +=
-			    StringUtil::Format(R"(
+			batch_query += StringUtil::Format(R"(
 UPDATE {METADATA_CATALOG}.ducklake_data_file SET begin_snapshot = %llu
 WHERE data_file_id = %llu;
 )",
-			                       snap, compaction.new_id.index);
+			                                  snap, compaction.new_id.index);
 		}
 	}
 	return batch_query;
@@ -9773,25 +9743,25 @@ void DuckLakeMetadataManager::DeleteInlinedData(const DuckLakeInlinedTableInfo &
 
 void DuckLakeMetadataManager::DeleteFlushedInlinedData(const DuckLakeInlinedTableInfo &inlined_table,
                                                        idx_t flush_snapshot_id) {
-	const bool shared_layout =
-	    transaction.GetCatalog().SupportsWritableBranches() && transaction.GetCatalog().GetInliningLayout() == "shared_table";
+	const bool shared_layout = transaction.GetCatalog().SupportsWritableBranches() &&
+	                           transaction.GetCatalog().GetInliningLayout() == "shared_table";
 	string branch_filter;
 	if (shared_layout) {
 		branch_filter = StringUtil::Format(" AND branch_id = %llu", transaction.GetSnapshot().branch_id);
 	}
-	auto result = Execute(StringUtil::Format(R"(
+	auto result =
+	    Execute(StringUtil::Format(R"(
 		DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d%s
 )",
-	                                         SQLIdentifier(inlined_table.table_name), flush_snapshot_id, branch_filter));
+	                               SQLIdentifier(inlined_table.table_name), flush_snapshot_id, branch_filter));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to delete flushed inlined data in DuckLake from table " +
 		                               inlined_table.table_name + ": ");
 	}
 }
 
-string
-DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables,
-                                                          bool shared_layout) {
+string DuckLakeMetadataManager::GenerateDeleteFlushedInlinedData(const vector<FlushedInlinedTableInfo> &flushed_tables,
+                                                                 bool shared_layout) {
 	string result;
 	for (auto &flushed : flushed_tables) {
 		result += StringUtil::Format("DELETE FROM {METADATA_CATALOG}.%s WHERE begin_snapshot <= %d%s;\n",

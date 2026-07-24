@@ -193,6 +193,12 @@ on the [ducklake.select](https://ducklake.select) docs site (Guides / Advanced F
 compose-clean DDL supported; flushed-inlined/compaction still not). Publishing the live
 ducklake.select page remains an out-of-repo `ducklake-web` change.
 
+**Status.** Port package shipped in-repo under [`docs/ducklake-web/`](../ducklake-web/README.md)
+(Jekyll-adapted `guides/branching.md`, menu patch, optional cross-link blurbs). A
+`duckdb/ducklake-web` issue tracks applying that package; the live site URL is not
+online until a maintainer merges the web PR (this agent cannot fork/push to
+`duckdb/ducklake-web`).
+
 ### Risks
 
 - Dual sources of truth (repo vs website) drifting — pick a canonical home and link the

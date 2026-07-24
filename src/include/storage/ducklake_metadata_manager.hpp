@@ -342,8 +342,7 @@ public:
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version);
 	static string InlinedTableNameFor(idx_t table_id, idx_t schema_version, idx_t branch_id,
 	                                  bool shared_layout = false);
-	static string InlinedTableDdlSql(const string &table_name, const string &column_defs,
-	                                 bool shared_layout = false);
+	static string InlinedTableDdlSql(const string &table_name, const string &column_defs, bool shared_layout = false);
 	static string InlinedTableRegistrationTuple(idx_t table_id, const string &table_name, idx_t schema_version);
 	static string LatestInlinedTableQuery(idx_t table_id, bool shared_layout = false);
 	static string DropDataFiles(const set<DataFileIndex> &dropped_files);
@@ -461,8 +460,8 @@ public:
 	virtual DuckLakeCherryPickResult CherryPick(const string &source_branch, idx_t snapshot_id,
 	                                            const string &target_branch, bool dry_run);
 	//! Phase 5: apply a source-owned snapshot range onto a target branch after one combined validation.
-	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot,
-	                                            idx_t end_snapshot, const string &target_branch, bool dry_run);
+	virtual DuckLakeTransplantResult Transplant(const string &source_branch, idx_t start_snapshot, idx_t end_snapshot,
+	                                            const string &target_branch, bool dry_run);
 	//! Phase 5: catalog-level diff between two refs.
 	virtual vector<DuckLakeDiffResult> DiffRefs(const string &ref_a, const string &ref_b);
 	virtual DuckLakeConvertInliningLayoutResult ConvertInliningLayout(const string &target_layout, bool dry_run);

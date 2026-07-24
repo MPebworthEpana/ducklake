@@ -373,10 +373,11 @@ Attach options: `BRANCH 'name'`, `AUTOMATIC_MIGRATION TRUE`.
 - Unbranched catalogs remain fully supported; branching features activate with
   the `1.1-dev*` metadata migrations above.
 
-> **Live docs.** Publishing this guide on [ducklake.select](https://ducklake.select)
-> is tracked via the **Needs Documentation** / `ducklake-web` workflow
-> (`.github/workflows/NeedsDocumentation.yml`). The in-repo file remains the
-> editable source until that port lands.
+> **Live docs.** The [ducklake.select](https://ducklake.select) port package is in
+> [`docs/ducklake-web/`](../ducklake-web/README.md) (Jekyll page + menu patches for
+> `duckdb/ducklake-web`). Intended URL:
+> [Branching](https://ducklake.select/docs/stable/duckdb/guides/branching).
+> This in-repo guide remains the editable source of truth until that PR merges.
 
 For design background and the Nessie parity map, see
 [`GIT_LIKE_BRANCHING_FEATURES.md`](../GIT_LIKE_BRANCHING_FEATURES.md).
