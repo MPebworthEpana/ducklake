@@ -94,9 +94,11 @@ taxonomy already understands.
   drop table only if not referenced on target; conflict when target altered the same
   table.
 
-**Status (partial).** CREATE TABLE apply shipped (`ApplyCherryPickCreatedTables`) with
-tests `cherry_pick_create_table.test` and `transplant_create_table_inlined.test`. Still
-fail-closed for ALTER/DROP, views, macros, and CREATE SCHEMA.
+**Status.** Shipped: compose-clean DDL cherry-pick/transplant for CREATE/DROP
+SCHEMA/TABLE/VIEW/MACRO and ALTER TABLE column ADD/DROP/RENAME, plus rename-as-create
+rows for tables/views. Covered by `cherry_pick_create_table.test`,
+`cherry_pick_inlined.test`, and `cherry_pick_ddl.test`. Still fail-closed for
+flushed-inlined and compaction snapshots.
 
 #### F1.3 — Compaction snapshots (optional / later within F1)
 
@@ -188,7 +190,7 @@ on the [ducklake.select](https://ducklake.select) docs site (Guides / Advanced F
 
 **Prep note.** In-repo guide points operators at the Needs Documentation /
 `ducklake-web` publish path; cherry-pick limitations match F1.1–F1.2 (inlined DML +
-CREATE TABLE supported; other DDL/compaction still not). Publishing the live
+compose-clean DDL supported; flushed-inlined/compaction still not). Publishing the live
 ducklake.select page remains an out-of-repo `ducklake-web` change.
 
 ### Risks
