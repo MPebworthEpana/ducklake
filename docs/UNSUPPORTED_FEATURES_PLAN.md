@@ -394,7 +394,7 @@ unenforced constraint metadata. Never enforce PK/FK in DuckLake.
 |---|---|---|
 | **U0** | Done | `ADD COLUMN … DEFAULT expr` backfills NULL; `UPDATE … SET DEFAULT` resolves bound defaults |
 | **U1** | Done | `array(N)` type + nested child `element`; postgres/sqlite inline as VARCHAR |
-| **U2** | Done (partial) | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT is session-scoped (not persisted across detach) |
+| **U2** | Done | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT persists via schema tags `udt:<name>` |
 | **U3** | Done (partial) | Constant generated columns materialize as defaults; column-ref expressions rejected |
 | **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
 | **U5** | Done | Unenforced `CHECK` stored as `check_*` table tags; not validated on write |
