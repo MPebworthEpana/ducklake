@@ -20,12 +20,12 @@ enforced PK/FK/UNIQUE. Treat CHECK as optional metadata later.
 |---|---|---|---|
 | **Done** | Non-literal column defaults (`now()`, etc.) | Already added (`default_value_type` / `default_value_dialect`) | Upstream [#571](https://github.com/duckdb/ducklake/pull/571); tests in `test/sql/default/default_expressions.test` |
 | **Done** | `VARIANT`, macros in DuckLake catalog | Spec already has them | Older docs listed these; current tree supports both |
-| **U0** | Expression-default completeness | Small | Remaining holes block real migrations |
-| **U1** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Migration casts `T[N]` → `T[]`; code already has ARRAY branches |
-| **U2** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Migration loses type safety by casting to `VARCHAR` |
-| **U3** | Stored generated columns | Yes (or reuse expression-default fields) | Migration forces app-side persistence; DuckDB uses these heavily |
-| **U4** | `DROP … CASCADE` for views/macros | No (catalog walk) | UX gap; docs already mark it “likely” |
-| **U5** | Unenforced `CHECK` (optional) | Yes | Useful for interop; do **not** enforce on lake scans |
+| **Done (U0)** | Expression-default completeness | Small | `ADD COLUMN … DEFAULT expr`, `UPDATE … SET DEFAULT` |
+| **Done (U1)** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Stored as `array(N)` + child `element` |
+| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + persisted `CREATE TYPE` |
+| **Done (U3)** | Stored generated columns | Tags / reuse expression-default fields | Constant + column-ref; evaluate on INSERT/UPDATE |
+| **Done (U4)** | `DROP … CASCADE` for views/macros | No (catalog walk) | Drops dependent views; RESTRICT lists them |
+| **Done (U5)** | Unenforced `CHECK` (optional) | Yes | Stored as `check_*` tags; not validated on write |
 | **Skip** | Enforced PK / UNIQUE / FK | N/A | Prohibitive on lake data; use `MERGE INTO` |
 | **Skip / cast** | `UNION`, `VARINT`, `BIT`, collations | N/A | Cast-on-migrate is fine; low ROI |
 
@@ -41,12 +41,8 @@ Stable unsupported-features docs still list some items that this tree already ha
 3. **Macros** — first-class DuckLake macros (`ducklake_macro*`), not only the old
    “create macro in `__ducklake_metadata_*`” workaround.
 
-Remaining default holes (part of **U0**):
-
-- `ALTER TABLE … ADD COLUMN … DEFAULT <expression>` still rejected (backfill cannot
-  evaluate write-time expressions for existing rows).
-- `UPDATE … SET DEFAULT` / `VALUE_DEFAULT` on DuckLake tables still rejected.
-- Nested defaults (`STRUCT` / `LIST` / `MAP` / `ARRAY`) still rejected.
+**U0** closed the ALTER / `SET DEFAULT` holes. Nested expression defaults
+(`STRUCT` / `LIST` / `MAP` / `ARRAY`) remain out of scope.
 
 ---
 
@@ -377,9 +373,9 @@ Once U1–U3 land, update the Python migrator from the docs so it:
 
 ## Recommendation
 
-Implement **U0 → U1 → U2 → U3** as the “necessary” set for real DuckDB database
-migrations. Defer CHECK until there is a concrete interop consumer that needs
-unenforced constraint metadata. Never enforce PK/FK in DuckLake.
+**U0–U5 are implemented on this branch.** Remaining work is optional polish
+(nested expression defaults, virtual generated columns) and migrator updates.
+Never enforce PK/FK in DuckLake.
 
 ---
 
