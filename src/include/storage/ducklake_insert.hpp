@@ -85,6 +85,10 @@ public:
 	                                           DuckLakeCopyInput &copy_input, optional_ptr<PhysicalOperator> plan);
 	static PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner,
 	                                    DuckLakeTableEntry &table, string encryption_key);
+	//! Project generated column expressions over a plan whose leading columns match table physical order.
+	//! Extra trailing columns (e.g. row_id for updates) are passed through unchanged.
+	static PhysicalOperator &PlanGeneratedColumnProjection(ClientContext &context, PhysicalPlanGenerator &planner,
+	                                                       DuckLakeTableEntry &table, PhysicalOperator &plan);
 	static void AddWrittenFiles(DuckLakeInsertGlobalState &gstate, DataChunk &chunk, const string &encryption_key,
 	                            optional_idx partition_id, bool set_snapshot_id = false);
 

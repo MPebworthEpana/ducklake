@@ -7,6 +7,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
+#include "duckdb/parser/constraints/check_constraint.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
@@ -30,6 +31,9 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "common/ducklake_util.hpp"
+#include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
+#include "duckdb/common/types.hpp"
 
 namespace duckdb {
 
@@ -433,6 +437,18 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, LogicalType::LIST(child_type),
 		                                  std::move(child_fields));
 	}
+	if (DuckLakeTypes::IsArrayType(col.type)) {
+		if (col.children.size() != 1) {
+			throw InvalidInputException("Arrays must have a single child entry");
+		}
+		auto array_size = DuckLakeTypes::ParseArraySize(col.type);
+		auto child_id = TransformColumnType(col.children[0]);
+		auto child_type = child_id->Type();
+		vector<unique_ptr<DuckLakeFieldId>> child_fields;
+		child_fields.push_back(std::move(child_id));
+		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name,
+		                                  LogicalType::ARRAY(child_type, array_size), std::move(child_fields));
+	}
 	if (StringUtil::CIEquals(col.type, "map")) {
 		if (col.children.size() != 2) {
 			throw InvalidInputException("Maps must have two child entries");
@@ -516,6 +532,27 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		schema_info.schema = Identifier(schema.name);
 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
 		                                                   std::move(schema.path));
+		// Reload user-defined types persisted as schema tags (key = udt:<name>)
+		auto context_ref = transaction.context.lock();
+		if (context_ref) {
+			for (auto &tag : schema.tags) {
+				if (!StringUtil::StartsWith(tag.key, "udt:") || tag.key.size() <= 4) {
+					continue;
+				}
+				string type_name = tag.key.substr(4);
+				try {
+					auto logical_type = TransformStringToLogicalType(tag.value, *context_ref);
+					if (logical_type.id() == LogicalTypeId::ENUM) {
+						logical_type.SetAlias(type_name);
+					}
+					CreateTypeInfo type_info(type_name, logical_type);
+					auto type_entry = make_uniq<TypeCatalogEntry>(*this, *schema_entry, type_info);
+					schema_entry->AddEntry(CatalogType::TYPE_ENTRY, std::move(type_entry));
+				} catch (...) {
+					// Skip unparseable UDT tags (e.g. from other dialects)
+				}
+			}
+		}
 		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
 	}
 
@@ -548,12 +585,16 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 				not_null_columns.insert(col_info.name);
 			}
 			ColumnDefinition column(Identifier(std::move(col_info.name)), field_id->Type());
+			InsertionOrderPreservingMap<string> column_tags;
 			for (auto &tag : col_info.tags) {
 				if (tag.key == "comment") {
 					column.SetComment(tag.value);
 				} else {
-					throw NotImplementedException("Only comment tags are supported for columns currently");
+					column_tags[tag.key] = tag.value;
 				}
+			}
+			if (!column_tags.empty()) {
+				column.SetTags(std::move(column_tags));
 			}
 			auto default_val = field_id->GetDefault();
 			if (default_val) {
@@ -566,6 +607,20 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		for (auto &not_null_col : not_null_columns) {
 			auto &col = create_table_info->columns.GetColumn(Identifier(not_null_col));
 			create_table_info->constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
+		}
+		// Reconstruct unenforced CHECK constraints from table tags
+		for (auto &tag : table.tags) {
+			if (!StringUtil::StartsWith(tag.key, "check_") || StringUtil::StartsWith(tag.key, "check_dialect_")) {
+				continue;
+			}
+			try {
+				auto exprs = Parser::ParseExpressionList(tag.value);
+				if (exprs.size() == 1) {
+					create_table_info->constraints.push_back(make_uniq<CheckConstraint>(std::move(exprs[0])));
+				}
+			} catch (...) {
+				// Ignore unparseable CHECK tags from other dialects
+			}
 		}
 		// create the table and add it to the schema set
 		auto table_entry = make_uniq<DuckLakeTableEntry>(

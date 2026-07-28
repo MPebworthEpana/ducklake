@@ -20,12 +20,12 @@ enforced PK/FK/UNIQUE. Treat CHECK as optional metadata later.
 |---|---|---|---|
 | **Done** | Non-literal column defaults (`now()`, etc.) | Already added (`default_value_type` / `default_value_dialect`) | Upstream [#571](https://github.com/duckdb/ducklake/pull/571); tests in `test/sql/default/default_expressions.test` |
 | **Done** | `VARIANT`, macros in DuckLake catalog | Spec already has them | Older docs listed these; current tree supports both |
-| **U0** | Expression-default completeness | Small | Remaining holes block real migrations |
-| **U1** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Migration casts `T[N]` → `T[]`; code already has ARRAY branches |
-| **U2** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Migration loses type safety by casting to `VARCHAR` |
-| **U3** | Stored generated columns | Yes (or reuse expression-default fields) | Migration forces app-side persistence; DuckDB uses these heavily |
-| **U4** | `DROP … CASCADE` for views/macros | No (catalog walk) | UX gap; docs already mark it “likely” |
-| **U5** | Unenforced `CHECK` (optional) | Yes | Useful for interop; do **not** enforce on lake scans |
+| **Done (U0)** | Expression-default completeness | Small | `ADD COLUMN … DEFAULT expr`, `UPDATE … SET DEFAULT` |
+| **Done (U1)** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Stored as `array(N)` + child `element` |
+| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + persisted `CREATE TYPE` |
+| **Done (U3)** | Stored generated columns | Tags / reuse expression-default fields | Constant + column-ref; evaluate on INSERT/UPDATE |
+| **Done (U4)** | `DROP … CASCADE` for views/macros | No (catalog walk) | Drops dependent views; RESTRICT lists them |
+| **Done (U5)** | Unenforced `CHECK` (optional) | Yes | Stored as `check_*` tags; not validated on write |
 | **Skip** | Enforced PK / UNIQUE / FK | N/A | Prohibitive on lake data; use `MERGE INTO` |
 | **Skip / cast** | `UNION`, `VARINT`, `BIT`, collations | N/A | Cast-on-migrate is fine; low ROI |
 
@@ -41,12 +41,8 @@ Stable unsupported-features docs still list some items that this tree already ha
 3. **Macros** — first-class DuckLake macros (`ducklake_macro*`), not only the old
    “create macro in `__ducklake_metadata_*`” workaround.
 
-Remaining default holes (part of **U0**):
-
-- `ALTER TABLE … ADD COLUMN … DEFAULT <expression>` still rejected (backfill cannot
-  evaluate write-time expressions for existing rows).
-- `UPDATE … SET DEFAULT` / `VALUE_DEFAULT` on DuckLake tables still rejected.
-- Nested defaults (`STRUCT` / `LIST` / `MAP` / `ARRAY`) still rejected.
+**U0** closed the ALTER / `SET DEFAULT` holes. Nested expression defaults
+(`STRUCT` / `LIST` / `MAP` / `ARRAY`) remain out of scope.
 
 ---
 
@@ -222,33 +218,28 @@ must be materialized (no `VIRTUAL`).
 
 ### Reasonable scope
 
-Support **STORED** only:
+Support **STORED** only (DuckDB `AS (expr)` / VIRTUAL syntax is treated as materialize/store):
 
-- Compute expression on INSERT/UPDATE/MERGE.
+- Compute expression on INSERT (and recompute on UPDATE of base columns).
 - Persist value in Parquet / inlined data like a normal column.
-- Reject `VIRTUAL` generated columns explicitly.
+- Reject direct `UPDATE` of generated columns.
+- Reject references to other generated columns (no cycles).
 
 ### Spec / metadata
 
-Reuse expression-default machinery:
-
-- `default_value` / `default_value_type='expression'` / `default_value_dialect`
-- Plus column tag `generated=stored` (or `column_type` qualifier)
-
-Do **not** invent a second expression dialect system.
+- Constant generated: `default_value` expression + column tag `generated=<expr>` + table tag `generated:<col>=<expr>`
+- Column-ref generated: column/table tags only (no default — ConstantBinder cannot bind column refs)
 
 ### Extension fix
 
-1. Remove generated-column hard reject in `DuckLakeTableEntry` ctor for STORED.
-2. On write paths, ensure omitted generated cols are filled from expression.
-3. Disallow updating generated columns directly (or only via `UPDATE` of base cols + recompute).
-4. Migration script: `CREATE TABLE … AS SELECT` already materializes — also emit STORED
-   definitions when expression is recoverable from DuckDB catalog.
+1. `MaterializeGeneratedColumns` converts GENERATED → STANDARD physical columns with tags.
+2. `PlanGeneratedColumnProjection` evaluates tagged expressions after defaults on INSERT/UPDATE.
+3. `BindUpdateConstraints` rejects SET on generated columns; base-col UPDATE recomputes via projection.
 
 ### Exit criteria
 
-`CREATE TABLE t(a INT, b INT GENERATED ALWAYS AS (a+1) STORED); INSERT INTO t(a) VALUES (1);`
-returns `b=2` after checkpoint/reattach.
+`CREATE TABLE t(a INT, b INT AS (a+1)); INSERT INTO t(a) VALUES (1);` returns `b=2`
+after checkpoint/reattach. `UPDATE t SET a = 10` recomputes `b`; `UPDATE t SET b = …` errors.
 
 ---
 
@@ -382,6 +373,22 @@ Once U1–U3 land, update the Python migrator from the docs so it:
 
 ## Recommendation
 
-Implement **U0 → U1 → U2 → U3** as the “necessary” set for real DuckDB database
-migrations. Defer CHECK until there is a concrete interop consumer that needs
-unenforced constraint metadata. Never enforce PK/FK in DuckLake.
+**U0–U5 are implemented on this branch.** Remaining work is optional polish
+(nested expression defaults, virtual generated columns) and migrator updates.
+Never enforce PK/FK in DuckLake.
+
+---
+
+## Implementation status (this branch)
+
+| ID | Status | Notes |
+|---|---|---|
+| **U0** | Done | `ADD COLUMN … DEFAULT expr` backfills NULL; `UPDATE … SET DEFAULT` resolves bound defaults |
+| **U1** | Done | `array(N)` type + nested child `element`; postgres/sqlite inline as VARCHAR |
+| **U2** | Done | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT persists via schema tags `udt:<name>` |
+| **U3** | Done | Constant + column-ref generated columns materialize as physical cols; evaluated on INSERT/UPDATE; direct UPDATE of generated cols rejected |
+| **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
+| **U5** | Done | Unenforced `CHECK` stored as `check_*` table tags; not validated on write |
+
+Tests: `test/sql/default/default_expressions.test`, `types/array.test`, `types/enum.test`,
+`general/generated_columns.test`, `constraints/unsupported.test`, `catalog/drop_cascade.test`.

@@ -23,6 +23,11 @@ public:
 	static bool RequiresCast(const vector<LogicalType> &types);
 	//! If this type requires a cast, return the type to cast to
 	static LogicalType GetCastedType(const LogicalType &type);
+
+	//! Whether the DuckLake type string is array(N)
+	static bool IsArrayType(const string &type);
+	//! Parse N from array(N)
+	static idx_t ParseArraySize(const string &type);
 };
 
 } // namespace duckdb

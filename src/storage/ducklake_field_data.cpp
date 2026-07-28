@@ -60,11 +60,9 @@ static Value ExtractInitialValue(optional_ptr<const ParsedExpression> initial_ex
 		return Value(type);
 	}
 	if (initial_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-		if (!add_column) {
-			return Value(type);
-		}
-		throw NotImplementedException("We cannot add a column with a non-literal default value. Add the column and "
-		                              "then explicitly set the default for new values using \"ALTER ... SET DEFAULT\"");
+		// Non-literal defaults cannot backfill existing rows (write-time expressions).
+		// Store NULL as the initial/backfill value and keep the expression as the ongoing default.
+		return Value(type);
 	}
 	auto &const_default = initial_expr->Cast<ConstantExpression>();
 	return const_default.GetValue().DefaultCastAs(type);
@@ -79,8 +77,8 @@ unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromType(const string &name,
 	switch (type.id()) {
 	case LogicalTypeId::STRUCT: {
 		// FIXME: check for struct pack
-		if (default_expr) {
-			throw NotImplementedException("Default value for STRUCT type not supported");
+		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+			throw NotImplementedException("Only constant default values are supported for STRUCT type");
 		}
 		for (auto &entry : StructType::GetChildTypes(type)) {
 			field_children.push_back(
@@ -89,22 +87,22 @@ unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromType(const string &name,
 		break;
 	}
 	case LogicalTypeId::LIST:
-		if (default_expr) {
-			throw NotImplementedException("Default value for LIST type not supported");
+		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+			throw NotImplementedException("Only constant default values are supported for LIST type");
 		}
 		field_children.push_back(
 		    FieldIdFromType("element", ListType::GetChildType(type), nullptr, column_id, add_column));
 		break;
 	case LogicalTypeId::ARRAY:
-		if (default_expr) {
-			throw NotImplementedException("Default value for LIST type not supported");
+		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+			throw NotImplementedException("Only constant default values are supported for ARRAY type");
 		}
 		field_children.push_back(
 		    FieldIdFromType("element", ArrayType::GetChildType(type), nullptr, column_id, add_column));
 		break;
 	case LogicalTypeId::MAP:
-		if (default_expr) {
-			throw NotImplementedException("Default value for MAP type not supported");
+		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+			throw NotImplementedException("Only constant default values are supported for MAP type");
 		}
 		field_children.push_back(FieldIdFromType("key", MapType::KeyType(type), nullptr, column_id, add_column));
 		field_children.push_back(FieldIdFromType("value", MapType::ValueType(type), nullptr, column_id, add_column));
@@ -129,7 +127,12 @@ unique_ptr<ParsedExpression> DuckLakeFieldId::GetDefault() const {
 
 unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromColumn(const ColumnDefinition &col, idx_t &column_id,
                                                                bool add_column) {
-	auto default_val = col.HasDefaultValue() ? optional_ptr<const ParsedExpression>(col.DefaultValue()) : nullptr;
+	optional_ptr<const ParsedExpression> default_val;
+	if (col.Generated()) {
+		default_val = col.GeneratedExpression();
+	} else if (col.HasDefaultValue()) {
+		default_val = col.DefaultValue();
+	}
 	return DuckLakeFieldId::FieldIdFromType(col.Name().GetIdentifierName(), col.Type(), default_val, column_id,
 	                                        add_column);
 }
@@ -182,6 +185,8 @@ LogicalType GetNewNestedType(const LogicalType &type, const vector<unique_ptr<Du
 	switch (type.id()) {
 	case LogicalTypeId::LIST:
 		return LogicalType::LIST(new_children[0]->Type());
+	case LogicalTypeId::ARRAY:
+		return LogicalType::ARRAY(new_children[0]->Type(), ArrayType::GetSize(type));
 	case LogicalTypeId::STRUCT:
 		return GetStructType(new_children);
 	case LogicalTypeId::MAP:
@@ -332,10 +337,6 @@ shared_ptr<DuckLakeFieldData> DuckLakeFieldData::SetDefault(const DuckLakeFieldD
 	auto result = make_shared_ptr<DuckLakeFieldData>();
 	auto new_default =
 	    new_col.HasDefaultValue() ? optional_ptr<const ParsedExpression>(new_col.DefaultValue()) : nullptr;
-	if (new_default && new_default->GetExpressionType() != ExpressionType::VALUE_CONSTANT && add_column) {
-		throw NotImplementedException("We cannot add a column with a non-literal default value. Add the column and "
-		                              "then explicitly set the default for new values using \"ALTER ... SET DEFAULT\"");
-	}
 	for (auto &existing_id : field_data.field_ids) {
 		unique_ptr<DuckLakeFieldId> field_id;
 		if (existing_id->GetFieldIndex() == field_index) {

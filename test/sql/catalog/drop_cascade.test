@@ -1,0 +1,55 @@
+# name: test/sql/catalog/drop_cascade.test
+# description: Test DROP TABLE/VIEW CASCADE in DuckLake
+# group: [catalog]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_drop_cascade')
+
+statement ok
+CREATE TABLE ducklake.t(i INTEGER);
+
+statement ok
+CREATE VIEW ducklake.v AS SELECT * FROM ducklake.t;
+
+# Without CASCADE, dependents block the drop
+statement error
+DROP TABLE ducklake.t;
+----
+depend
+
+statement ok
+DROP TABLE ducklake.t CASCADE;
+
+statement error
+SELECT * FROM ducklake.v;
+----
+does not exist
+
+statement error
+SELECT * FROM ducklake.t;
+----
+does not exist
+
+# Recreate and drop the view with cascade (no dependents)
+statement ok
+CREATE TABLE ducklake.t2(i INTEGER);
+
+statement ok
+CREATE VIEW ducklake.v2 AS SELECT * FROM ducklake.t2;
+
+statement ok
+DROP VIEW ducklake.v2 CASCADE;
+
+statement ok
+SELECT * FROM ducklake.t2;
+
+statement ok
+DROP TABLE ducklake.t2;

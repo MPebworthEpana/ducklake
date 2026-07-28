@@ -88,7 +88,28 @@ SELECT table_id, column_id, default_value, default_value_type, default_value_dia
 3	2	NULL	literal	duckdb
 3	2	random()	literal	duckdb
 
-statement error
-ALTER TABLE t_2 ADD COLUMN j INTEGER DEFAULT RANDOM()
+statement ok
+ALTER TABLE t_2 ADD COLUMN j DOUBLE DEFAULT RANDOM()
+
+statement ok
+insert into t_2(a) values (2)
+
+query I
+SELECT j IS NOT NULL AND j >= 0 AND j < 1 FROM t_2 WHERE a = 2
 ----
-We cannot add a column with a non-literal default value. Add the column and then explicitly set the default for new values using "ALTER ... SET DEFAULT"
+true
+
+# UPDATE SET DEFAULT uses the column default expression
+statement ok
+create table t_3 (id integer, v double default random());
+
+statement ok
+insert into t_3(id) values (1);
+
+statement ok
+UPDATE t_3 SET v = DEFAULT WHERE id = 1;
+
+query I
+SELECT v IS NOT NULL AND v >= 0 AND v < 1 FROM t_3
+----
+true

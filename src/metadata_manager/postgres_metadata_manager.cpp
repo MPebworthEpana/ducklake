@@ -17,6 +17,7 @@ bool PostgresMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	case LogicalTypeId::STRUCT:
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::LIST:
+	case LogicalTypeId::ARRAY:
 	case LogicalTypeId::UBIGINT:
 	case LogicalTypeId::HUGEINT:
 	case LogicalTypeId::UHUGEINT:

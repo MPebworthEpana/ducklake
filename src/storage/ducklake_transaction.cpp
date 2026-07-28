@@ -30,6 +30,8 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/client_config.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 bool LocalTableDataChanges::IsEmpty() const {
@@ -2032,6 +2034,35 @@ void DuckLakeTransaction::DropTableMacro(DuckLakeTableMacroEntry &macro) {
 	state->dropped_table_macros.insert(macro.GetIndex());
 }
 
+void DuckLakeTransaction::RegisterUserType(SchemaIndex schema_id, const string &type_name, const string &type_sql) {
+	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
+	string key = "udt:" + type_name;
+	// If there was a pending drop for the same key in this txn, cancel it.
+	auto &dropped = state->dropped_udt_tags;
+	dropped.erase(std::remove_if(dropped.begin(), dropped.end(),
+	                             [&](const DuckLakeTagInfo &tag) { return tag.id == schema_id.index && tag.key == key; }),
+	              dropped.end());
+	DuckLakeTagInfo tag;
+	tag.id = schema_id.index;
+	tag.key = std::move(key);
+	tag.value = Value(type_sql);
+	state->new_udt_tags.push_back(std::move(tag));
+}
+
+void DuckLakeTransaction::UnregisterUserType(SchemaIndex schema_id, const string &type_name) {
+	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
+	string key = "udt:" + type_name;
+	// If there was a pending create for the same key in this txn, cancel it.
+	auto &created = state->new_udt_tags;
+	created.erase(std::remove_if(created.begin(), created.end(),
+	                             [&](const DuckLakeTagInfo &tag) { return tag.id == schema_id.index && tag.key == key; }),
+	              created.end());
+	DuckLakeTagInfo tag;
+	tag.id = schema_id.index;
+	tag.key = std::move(key);
+	state->dropped_udt_tags.push_back(std::move(tag));
+}
+
 void DuckLakeTransaction::DropFile(TableIndex table_id, DataFileIndex data_file_id, string path, idx_t row_count,
                                    idx_t file_size_bytes) {
 	state->tables_deleted_from.insert(table_id);
@@ -2097,6 +2128,8 @@ void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
 	case CatalogType::SCHEMA_ENTRY:
 		DropSchema(entry.Cast<DuckLakeSchemaEntry>());
 		break;
+	case CatalogType::TYPE_ENTRY:
+		throw InternalException("TYPE_ENTRY drops are handled directly on the schema catalog set");
 	default:
 		throw InternalException("Unsupported type for drop");
 	}
@@ -2125,6 +2158,8 @@ bool DuckLakeTransaction::IsDeleted(CatalogEntry &entry) {
 		auto &schema_entry = entry.Cast<DuckLakeSchemaEntry>();
 		return s.dropped_schemas.find(schema_entry.GetSchemaId()) != s.dropped_schemas.end();
 	}
+	case CatalogType::TYPE_ENTRY:
+		return false;
 	default:
 		throw InternalException("Catalog type not supported for IsDeleted");
 	}
@@ -2143,7 +2178,8 @@ bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
 	}
 	case CatalogType::MACRO_ENTRY:
 	case CatalogType::SCHEMA_ENTRY:
-	case CatalogType::TABLE_MACRO_ENTRY: {
+	case CatalogType::TABLE_MACRO_ENTRY:
+	case CatalogType::TYPE_ENTRY: {
 		return false;
 	}
 	default:

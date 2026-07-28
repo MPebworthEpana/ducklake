@@ -15,7 +15,8 @@ namespace duckdb {
 class DuckLakeUpdate : public PhysicalOperator {
 public:
 	DuckLakeUpdate(PhysicalPlan &physical_plan, DuckLakeTableEntry &table, vector<PhysicalIndex> columns,
-	               PhysicalOperator &child, PhysicalOperator &delete_op, vector<unique_ptr<Expression>> &expressions);
+	               PhysicalOperator &child, PhysicalOperator &delete_op, vector<unique_ptr<Expression>> &expressions,
+	               vector<unique_ptr<Expression>> bound_defaults_p);
 
 	//! The table to update
 	DuckLakeTableEntry &table;
@@ -26,6 +27,8 @@ public:
 	//! The row-id-index
 	idx_t row_id_index;
 	vector<unique_ptr<Expression>> expressions;
+	//! Bound DEFAULT expressions indexed by physical column index
+	vector<unique_ptr<Expression>> bound_defaults;
 
 	static constexpr uint8_t DELETION_INFO_SIZE = 3;
 

@@ -43,9 +43,11 @@ struct FileRowIdHash {
 
 DuckLakeUpdate::DuckLakeUpdate(PhysicalPlan &physical_plan, DuckLakeTableEntry &table, vector<PhysicalIndex> columns_p,
                                PhysicalOperator &child, PhysicalOperator &delete_op,
-                               vector<unique_ptr<Expression>> &expressions)
+                               vector<unique_ptr<Expression>> &expressions,
+                               vector<unique_ptr<Expression>> bound_defaults_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, {}, 1), table(table),
-      columns(std::move(columns_p)), delete_op(delete_op), expressions(std::move(expressions)) {
+      columns(std::move(columns_p)), delete_op(delete_op), expressions(std::move(expressions)),
+      bound_defaults(std::move(bound_defaults_p)) {
 	children.push_back(child);
 	row_id_index = columns.size();
 }
@@ -68,12 +70,19 @@ public:
 class DuckLakeUpdateLocalState : public OperatorState {
 public:
 	unique_ptr<LocalSinkState> delete_local_state;
+	//! Owned copies of non-DEFAULT expressions for the expression executor
+	vector<unique_ptr<Expression>> executor_expressions;
 	unique_ptr<ExpressionExecutor> expression_executor;
+	ExpressionExecutor default_executor;
 	//! Chunk where the updated expressions are executed.
 	DataChunk update_expression_chunk;
 	DataChunk insert_chunk;
 	DataChunk delete_chunk;
 	idx_t updated_count = 0;
+
+	explicit DuckLakeUpdateLocalState(ClientContext &context, const vector<unique_ptr<Expression>> &bound_defaults)
+	    : default_executor(context, bound_defaults) {
+	}
 };
 
 unique_ptr<GlobalOperatorState> DuckLakeUpdate::GetGlobalOperatorState(ClientContext &context) const {
@@ -84,7 +93,7 @@ unique_ptr<GlobalOperatorState> DuckLakeUpdate::GetGlobalOperatorState(ClientCon
 }
 
 unique_ptr<OperatorState> DuckLakeUpdate::GetOperatorState(ExecutionContext &context) const {
-	auto result = make_uniq<DuckLakeUpdateLocalState>();
+	auto result = make_uniq<DuckLakeUpdateLocalState>(context.client, bound_defaults);
 	result->delete_local_state = delete_op.GetLocalSinkState(context);
 
 	vector<LogicalType> delete_types;
@@ -92,11 +101,19 @@ unique_ptr<OperatorState> DuckLakeUpdate::GetOperatorState(ExecutionContext &con
 	delete_types.emplace_back(LogicalType::UBIGINT);
 	delete_types.emplace_back(LogicalType::BIGINT);
 
+	// Expression types use column types for DEFAULT placeholders (BoundDefault return type)
 	vector<LogicalType> expression_types;
-	result->expression_executor = make_uniq<ExpressionExecutor>(context.client, expressions);
-	for (auto &expr : result->expression_executor->expressions) {
-		expression_types.push_back(expr->GetReturnType());
+	for (idx_t i = 0; i < expressions.size(); i++) {
+		LogicalType expr_type = expressions[i]->GetReturnType();
+		expression_types.push_back(expr_type);
+		if (expressions[i]->GetExpressionType() == ExpressionType::VALUE_DEFAULT) {
+			// Placeholder — DEFAULT is evaluated via default_executor
+			result->executor_expressions.push_back(make_uniq<BoundConstantExpression>(Value(expr_type)));
+		} else {
+			result->executor_expressions.push_back(expressions[i]->Copy());
+		}
 	}
+	result->expression_executor = make_uniq<ExpressionExecutor>(context.client, result->executor_expressions);
 
 	result->update_expression_chunk.Initialize(context.client, expression_types);
 	result->insert_chunk.Initialize(context.client, types);
@@ -114,7 +131,10 @@ OperatorResultType DuckLakeUpdate::Execute(ExecutionContext &context, DataChunk 
 	auto &lstate = state_p.Cast<DuckLakeUpdateLocalState>();
 
 	// filter duplicate row IDs using deletion info (last 3 columns)
+	// Input layout: [projected columns...][row_id][file_name, file_index, row_number]
+	// BoundDefault expressions are not projected, so projected column count may be < columns.size().
 	idx_t delete_idx_start = input.ColumnCount() - DELETION_INFO_SIZE;
+	idx_t input_row_id_index = delete_idx_start - 1;
 	auto &file_index_vec = input.data[delete_idx_start + 1];
 	auto &row_number_vec = input.data[delete_idx_start + 2];
 
@@ -146,11 +166,22 @@ OperatorResultType DuckLakeUpdate::Execute(ExecutionContext &context, DataChunk 
 	// slice to non-duplicate rows only
 	input.Slice(sel, sel_count);
 
-	// evaluate update expressions
+	// evaluate update expressions (DEFAULT via default_executor, matching PhysicalUpdate)
 	auto &update_expression_chunk = lstate.update_expression_chunk;
 	auto &insert_chunk = lstate.insert_chunk;
 
-	lstate.expression_executor->Execute(input, update_expression_chunk);
+	update_expression_chunk.Reset();
+	lstate.default_executor.SetChunk(input);
+	lstate.expression_executor->SetChunk(input);
+	for (idx_t i = 0; i < expressions.size(); i++) {
+		if (expressions[i]->GetExpressionType() == ExpressionType::VALUE_DEFAULT) {
+			// physical column index i (expressions are in physical column order)
+			lstate.default_executor.ExecuteExpression(i, update_expression_chunk.data[i]);
+		} else {
+			lstate.expression_executor->ExecuteExpression(i, update_expression_chunk.data[i]);
+		}
+	}
+	update_expression_chunk.SetChildCardinality(input.size());
 
 	const idx_t physical_column_count = columns.size();
 
@@ -159,7 +190,7 @@ OperatorResultType DuckLakeUpdate::Execute(ExecutionContext &context, DataChunk 
 		insert_chunk.data[i].Reference(update_expression_chunk.data[i]);
 	}
 	// we place row_id right after physical columns
-	insert_chunk.data[physical_column_count].Reference(input.data[row_id_index]);
+	insert_chunk.data[physical_column_count].Reference(input.data[input_row_id_index]);
 	insert_chunk.SetChildCardinality(input.size());
 
 	chunk.Reference(insert_chunk);
@@ -219,11 +250,6 @@ InsertionOrderPreservingMap<string> DuckLakeUpdate::ParamsToString() const {
 DuckLakeUpdate &DuckLakeUpdate::PlanUpdateOperator(ClientContext &context, PhysicalPlanGenerator &planner,
                                                    LogicalUpdate &op, PhysicalOperator &child_plan,
                                                    DuckLakeCopyInput &copy_input) {
-	for (auto &expr : op.expressions) {
-		if (expr->GetExpressionType() == ExpressionType::VALUE_DEFAULT) {
-			throw BinderException("SET DEFAULT is not yet supported for updates of a DuckLake table");
-		}
-	}
 	auto &table = op.table.Cast<DuckLakeTableEntry>();
 
 	vector<idx_t> row_id_indexes;
@@ -233,18 +259,28 @@ DuckLakeUpdate &DuckLakeUpdate::PlanUpdateOperator(ClientContext &context, Physi
 	auto &delete_op = DuckLakeDelete::PlanDelete(context, planner, table, child_plan, std::move(row_id_indexes),
 	                                             copy_input.encryption_key, false);
 
-	// build update expressions (physical columns only, no partition cols, no casts)
+	// build update expressions in physical column order 0..n-1.
+	// Keep BoundDefault placeholders; they are evaluated via bound_defaults at execution time.
 	vector<unique_ptr<Expression>> expressions;
 	unordered_map<idx_t, idx_t> expression_map;
 	for (idx_t i = 0; i < op.columns.size(); i++) {
 		expression_map[op.columns[i].index] = i;
 	}
-	for (idx_t i = 0; i < op.columns.size(); i++) {
-		expressions.push_back(op.expressions[expression_map[i]]->Copy());
+	for (idx_t physical_idx = 0; physical_idx < op.columns.size(); physical_idx++) {
+		auto &expr = op.expressions[expression_map[physical_idx]];
+		if (expr->GetExpressionType() == ExpressionType::VALUE_DEFAULT) {
+			if (physical_idx >= op.bound_defaults.size() || !op.bound_defaults[physical_idx]) {
+				throw BinderException("SET DEFAULT is not supported for column \"%s\" - no default value is defined",
+				                      table.GetColumn(LogicalIndex(physical_idx)).Name().GetIdentifierName());
+			}
+		}
+		expressions.push_back(expr->Copy());
 	}
 
 	auto &update_op =
-	    planner.Make<DuckLakeUpdate>(table, op.columns, child_plan, delete_op, expressions).Cast<DuckLakeUpdate>();
+	    planner
+	        .Make<DuckLakeUpdate>(table, op.columns, child_plan, delete_op, expressions, std::move(op.bound_defaults))
+	        .Cast<DuckLakeUpdate>();
 
 	// set output types we use physical column types + BIGINT row_id
 	vector<LogicalType> update_output_types;
@@ -267,8 +303,9 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
 	copy_input.virtual_columns = InsertVirtualColumns::WRITE_ROW_ID;
 	auto &update_op = DuckLakeUpdate::PlanUpdateOperator(context, planner, op, child_plan, copy_input);
 
-	// follow the insert path for inlining
-	optional_ptr<PhysicalOperator> plan = &update_op;
+	// Recompute generated columns from expressions after applying SET clauses
+	optional_ptr<PhysicalOperator> plan =
+	    &DuckLakeInsert::PlanGeneratedColumnProjection(context, planner, table, update_op);
 	optional_ptr<DuckLakeInlineData> inline_data;
 
 	idx_t data_inlining_row_limit = GetInliningLimit(context, table);
@@ -290,6 +327,14 @@ void DuckLakeTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, 
                                                LogicalUpdate &update, ClientContext &context) {
 	// all updates in DuckLake are deletes + inserts
 	update.update_is_del_and_insert = true;
+
+	// Reject direct updates of generated columns before expanding to all physical columns
+	for (auto &col_idx : update.columns) {
+		auto &col = columns.GetColumn(col_idx);
+		if (col.Tags().find("generated") != col.Tags().end()) {
+			throw BinderException("Cannot update generated column \"%s\"", col.Name().GetIdentifierName());
+		}
+	}
 
 	// push projections for all columns that are not projected yet
 	// FIXME: this is almost a copy of LogicalUpdate::BindExtraColumns aside from the duplicate elimination
