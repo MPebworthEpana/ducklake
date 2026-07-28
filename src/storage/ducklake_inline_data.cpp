@@ -9,6 +9,7 @@
 #include "storage/ducklake_transaction.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/common/vector/map_vector.hpp"
 
@@ -286,6 +287,12 @@ void UpdateStats(vector<DuckLakeBaseColumnStats> &stats, idx_t c, Vector &data, 
 		case LogicalTypeId::LIST: {
 			auto &child = ListVector::GetChildMutable(data);
 			UpdateStats(column_stats.children, 0, child, ListVector::GetListSize(data), field_id.GetChildByIndex(0));
+			break;
+		}
+		case LogicalTypeId::ARRAY: {
+			auto &child = ArrayVector::GetChildMutable(data);
+			auto array_size = ArrayType::GetSize(type);
+			UpdateStats(column_stats.children, 0, child, row_count * array_size, field_id.GetChildByIndex(0));
 			break;
 		}
 		case LogicalTypeId::MAP: {

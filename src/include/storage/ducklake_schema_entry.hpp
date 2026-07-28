@@ -78,6 +78,9 @@ private:
 	DuckLakeCatalogSet tables;
 	DuckLakeCatalogSet scalar_macros;
 	DuckLakeCatalogSet table_macros;
+	//! Session-scoped user types (CREATE TYPE). Not persisted across detach;
+	//! ENUM columns still persist via enum(...) type serialization.
+	DuckLakeCatalogSet types;
 	mutex default_function_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> default_function_map;
 };

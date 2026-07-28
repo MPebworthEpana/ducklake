@@ -15,6 +15,7 @@ bool SQLiteMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	case LogicalTypeId::STRUCT:
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::LIST:
+	case LogicalTypeId::ARRAY:
 	// SQLite converts IEEE 754 NaN to NULL when storing double values,
 	// so FLOAT/DOUBLE must be stored as VARCHAR to preserve NaN through the round-trip
 	case LogicalTypeId::FLOAT:

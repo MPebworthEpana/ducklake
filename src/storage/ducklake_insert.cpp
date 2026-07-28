@@ -302,8 +302,9 @@ CopyFunctionCatalogEntry &DuckLakeFunctions::GetCopyFunction(ClientContext &cont
 
 static Value GetFieldIdValue(const DuckLakeFieldId &field_id) {
 	auto field_id_value = Value::BIGINT(NumericCast<int64_t>(field_id.GetFieldIndex().index));
-	if (!field_id.HasChildren()) {
-		// primitive type - return the field-id directly
+	// Parquet FIELD_IDS only supports nested ids for LIST/MAP/STRUCT — not ARRAY
+	if (!field_id.HasChildren() || field_id.Type().id() == LogicalTypeId::ARRAY) {
+		// primitive type (or ARRAY treated as leaf for parquet) - return the field-id directly
 		return field_id_value;
 	}
 	// nested type - generate a struct and recurse into children

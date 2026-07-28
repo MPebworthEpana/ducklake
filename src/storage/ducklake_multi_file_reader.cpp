@@ -197,8 +197,11 @@ MultiFileColumnDefinition CreateColumnFromFieldId(const DuckLakeFieldId &field_i
 		column.default_expression = make_uniq<ConstantExpression>(column_data.initial_default);
 	}
 	column.identifier = Value::INTEGER(NumericCast<int32_t>(field_id.GetFieldIndex().index));
-	for (auto &child : field_id.Children()) {
-		column.children.push_back(CreateColumnFromFieldId(*child, emit_key_value));
+	// Parquet FIELD_IDS treat ARRAY as a leaf (no nested children), matching WrittenFieldIds
+	if (field_id.Type().id() != LogicalTypeId::ARRAY) {
+		for (auto &child : field_id.Children()) {
+			column.children.push_back(CreateColumnFromFieldId(*child, emit_key_value));
+		}
 	}
 	if (field_id.Type().id() == LogicalTypeId::MAP && emit_key_value) {
 		// for maps, insert a dummy "key_value" entry

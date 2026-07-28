@@ -1,0 +1,72 @@
+# name: test/sql/types/enum.test
+# description: test ENUM types in ducklake
+# group: [types]
+
+require ducklake
+
+require parquet
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+
+statement ok
+CREATE TABLE ducklake.test AS SELECT 'hello'::ENUM('world', 'hello') AS h;
+
+statement ok
+INSERT INTO ducklake.test VALUES ('world');
+
+query I
+SELECT * FROM ducklake.test ORDER BY h
+----
+world
+hello
+
+query I
+SELECT typeof(h) FROM ducklake.test LIMIT 1
+----
+ENUM('world', 'hello')
+
+# Session-scoped CREATE TYPE (ENUM); not persisted across detach
+statement ok
+CREATE TYPE ducklake.mood AS ENUM ('happy', 'sad');
+
+statement ok
+CREATE TABLE ducklake.moods(m ducklake.mood);
+
+statement ok
+INSERT INTO ducklake.moods VALUES ('happy'), ('sad');
+
+query I
+SELECT * FROM ducklake.moods ORDER BY m
+----
+happy
+sad
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+
+query I
+SELECT * FROM ducklake.test ORDER BY h
+----
+world
+hello
+
+query I
+SELECT typeof(h) FROM ducklake.test LIMIT 1
+----
+ENUM('world', 'hello')
+
+# Column ENUM physical type persists via enum(...) serialization even though CREATE TYPE does not
+query I
+SELECT * FROM ducklake.moods ORDER BY m
+----
+happy
+sad
+
+# Named type is session-scoped and gone after reattach
+statement error
+SELECT 'happy'::ducklake.mood;
+----

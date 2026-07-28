@@ -16,18 +16,7 @@ ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/duck
 
 # unsupported types
 statement error
-CREATE TABLE ducklake.test(ts INT[3]);
-----
-unsupported type
-
-statement error
 CREATE TABLE ducklake.test(ts UNION(i INT, j INT));
-----
-unsupported type
-
-# enum
-statement error
-CREATE TABLE ducklake.test AS SELECT 'hello'::ENUM('world', 'hello') AS h;
 ----
 unsupported type
 
@@ -41,9 +30,3 @@ statement error
 CREATE TABLE ducklake.test(s VARCHAR USING COMPRESSION ZSTD);
 ----
 compression type for a column is not supported in DuckLake
-
-# unsupported type in a struct
-statement error
-CREATE TABLE ducklake.test(ts STRUCT(x INT[3]));
-----
-unsupported type

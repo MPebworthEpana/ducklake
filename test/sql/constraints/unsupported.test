@@ -19,7 +19,14 @@ CREATE TABLE ducklake.test(i INTEGER PRIMARY KEY, j INTEGER);
 ----
 not supported
 
-statement error
-CREATE TABLE ducklake.test(i INTEGER, j INTEGER,  CHECK (i > j));
+# CHECK is accepted but not enforced
+statement ok
+CREATE TABLE ducklake.test(i INTEGER, j INTEGER, CHECK (i > j));
+
+statement ok
+INSERT INTO ducklake.test VALUES (1, 2);
+
+query II
+SELECT * FROM ducklake.test
 ----
-not supported
+1	2

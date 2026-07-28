@@ -2097,6 +2097,8 @@ void DuckLakeTransaction::DropEntry(CatalogEntry &entry) {
 	case CatalogType::SCHEMA_ENTRY:
 		DropSchema(entry.Cast<DuckLakeSchemaEntry>());
 		break;
+	case CatalogType::TYPE_ENTRY:
+		throw InternalException("TYPE_ENTRY drops are handled directly on the schema catalog set");
 	default:
 		throw InternalException("Unsupported type for drop");
 	}
@@ -2125,6 +2127,8 @@ bool DuckLakeTransaction::IsDeleted(CatalogEntry &entry) {
 		auto &schema_entry = entry.Cast<DuckLakeSchemaEntry>();
 		return s.dropped_schemas.find(schema_entry.GetSchemaId()) != s.dropped_schemas.end();
 	}
+	case CatalogType::TYPE_ENTRY:
+		return false;
 	default:
 		throw InternalException("Catalog type not supported for IsDeleted");
 	}
@@ -2143,7 +2147,8 @@ bool DuckLakeTransaction::IsRenamed(CatalogEntry &entry) {
 	}
 	case CatalogType::MACRO_ENTRY:
 	case CatalogType::SCHEMA_ENTRY:
-	case CatalogType::TABLE_MACRO_ENTRY: {
+	case CatalogType::TABLE_MACRO_ENTRY:
+	case CatalogType::TYPE_ENTRY: {
 		return false;
 	}
 	default:

@@ -6687,6 +6687,11 @@ string DuckLakeMetadataManager::GetColumnType(const DuckLakeColumnInfo &col) {
 	case LogicalTypeId::LIST: {
 		return GetColumnType(col.children[0]) + "[]";
 	}
+	case LogicalTypeId::ARRAY: {
+		// Fixed-size arrays use DuckDB ARRAY(T)[N] syntax for inlined SQL
+		auto size = DuckLakeTypes::ParseArraySize(col.type);
+		return StringUtil::Format("%s[%llu]", GetColumnType(col.children[0]), NumericCast<uint64_t>(size));
+	}
 	case LogicalTypeId::MAP: {
 		return StringUtil::Format("MAP(%s, %s)", GetColumnType(col.children[0]), GetColumnType(col.children[1]));
 	}

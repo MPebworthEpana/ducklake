@@ -23,6 +23,7 @@
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/storage/statistics/struct_stats.hpp"
 #include "duckdb/storage/statistics/list_stats.hpp"
+#include "duckdb/storage/statistics/array_stats.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -116,9 +117,9 @@ DuckLakeTableEntry::DuckLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
 	for (auto &constraint : constraints) {
 		switch (constraint->type) {
 		case ConstraintType::NOT_NULL:
-			break;
 		case ConstraintType::CHECK:
-			throw NotImplementedException("CHECK constraints are not supported in DuckLake");
+			// CHECK constraints are stored but not enforced
+			break;
 		case ConstraintType::UNIQUE:
 			throw NotImplementedException("PRIMARY KEY/UNIQUE constraints are not supported in DuckLake");
 		case ConstraintType::FOREIGN_KEY:
@@ -296,6 +297,12 @@ unique_ptr<BaseStatistics> GetColumnStats(const DuckLakeFieldId &field_id, const
 		auto child_stats = GetColumnStats(*field_children[0], table_stats);
 		ListStats::SetChildStats(list_stats, std::move(child_stats));
 		return list_stats.ToUnique();
+	}
+	case LogicalTypeId::ARRAY: {
+		auto array_stats = ArrayStats::CreateUnknown(field_id.Type());
+		auto child_stats = GetColumnStats(*field_children[0], table_stats);
+		ArrayStats::SetChildStats(array_stats, std::move(child_stats));
+		return array_stats.ToUnique();
 	}
 	case LogicalTypeId::MAP: {
 		auto key_stats = GetColumnStats(*field_children[0], table_stats);

@@ -1309,6 +1309,47 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			auto new_table_id = new_table.id;
 			result.new_tables.push_back(std::move(new_table));
 
+			// Persist table comment and tags (including unenforced CHECK / generated markers)
+			auto &table_entry = table.Cast<TableCatalogEntry>();
+			if (!table_entry.comment.IsNull()) {
+				DuckLakeTagInfo comment_info;
+				comment_info.id = new_table_id.index;
+				comment_info.key = "comment";
+				comment_info.value = table_entry.comment;
+				result.new_tags.push_back(std::move(comment_info));
+			}
+			for (auto &tag : table_entry.tags) {
+				DuckLakeTagInfo tag_info;
+				tag_info.id = new_table_id.index;
+				tag_info.key = tag.first;
+				tag_info.value = Value(tag.second);
+				result.new_tags.push_back(std::move(tag_info));
+			}
+			// Persist column tags (e.g. generated column provenance)
+			for (auto &col : table_entry.GetColumns().Logical()) {
+				auto &col_tags = col.Tags();
+				if (col_tags.empty() && col.Comment().IsNull()) {
+					continue;
+				}
+				auto &field_id = table.GetFieldId(col.Physical());
+				if (!col.Comment().IsNull()) {
+					DuckLakeColumnTagInfo comment_info;
+					comment_info.table_id = new_table_id;
+					comment_info.field_index = field_id.GetFieldIndex();
+					comment_info.key = "comment";
+					comment_info.value = col.Comment();
+					result.new_column_tags.push_back(std::move(comment_info));
+				}
+				for (auto &tag : col_tags) {
+					DuckLakeColumnTagInfo tag_info;
+					tag_info.table_id = new_table_id;
+					tag_info.field_index = field_id.GetFieldIndex();
+					tag_info.key = tag.first;
+					tag_info.value = Value(tag.second);
+					result.new_column_tags.push_back(std::move(tag_info));
+				}
+			}
+
 			// remap the table in the commit state
 			commit_state.committed_tables.emplace(old_table_id, new_table_id);
 

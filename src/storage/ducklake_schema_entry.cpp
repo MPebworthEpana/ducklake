@@ -1,9 +1,13 @@
 #include "storage/ducklake_schema_entry.hpp"
 #include "duckdb/catalog/similar_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/constraints/check_constraint.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_table_entry.hpp"
@@ -61,6 +65,94 @@ bool DuckLakeSchemaEntry::HandleCreateConflict(CatalogTransaction transaction, C
 	return true;
 }
 
+namespace {
+
+void MaterializeGeneratedColumns(CreateTableInfo &info) {
+	bool has_generated = false;
+	for (auto &col : info.columns.Logical()) {
+		if (col.Generated()) {
+			has_generated = true;
+			break;
+		}
+	}
+	if (!has_generated) {
+		return;
+	}
+	ColumnList new_columns;
+	for (auto &col : info.columns.Logical()) {
+		if (!col.Generated()) {
+			new_columns.AddColumn(col.Copy());
+			continue;
+		}
+		bool has_column_ref = false;
+		ParsedExpressionIterator::VisitExpressionClass(
+		    col.GeneratedExpression(), ExpressionClass::COLUMN_REF,
+		    [&](const ParsedExpression &) { has_column_ref = true; });
+		if (has_column_ref) {
+			throw NotImplementedException(
+			    "DuckLake only supports generated columns that do not reference other columns "
+			    "(materialized as defaults)");
+		}
+		ColumnDefinition new_col(col.Name(), col.Type());
+		new_col.SetDefaultValue(col.GeneratedExpression().Copy());
+		auto tags = col.Tags();
+		tags["generated"] = col.GeneratedExpression().ToString();
+		new_col.SetTags(std::move(tags));
+		if (!col.Comment().IsNull()) {
+			new_col.SetComment(col.Comment());
+		}
+		info.tags["generated:" + col.Name().GetIdentifierName()] = col.GeneratedExpression().ToString();
+		new_columns.AddColumn(std::move(new_col));
+	}
+	info.columns = std::move(new_columns);
+}
+
+bool IsSQLIdentifierChar(char c) {
+	return StringUtil::CharacterIsAlphaNumeric(c) || c == '_';
+}
+
+//! True if `query` references `identifier` as a SQL identifier (word boundary / after '.').
+bool QueryReferencesIdentifier(const string &query, const string &identifier) {
+	if (identifier.empty()) {
+		return false;
+	}
+	auto lower_query = StringUtil::Lower(query);
+	auto lower_id = StringUtil::Lower(identifier);
+	idx_t pos = 0;
+	while ((pos = lower_query.find(lower_id, pos)) != string::npos) {
+		bool start_ok = pos == 0 || !IsSQLIdentifierChar(lower_query[pos - 1]);
+		idx_t end = pos + lower_id.size();
+		bool end_ok = end >= lower_query.size() || !IsSQLIdentifierChar(lower_query[end]);
+		if (start_ok && end_ok) {
+			return true;
+		}
+		pos++;
+	}
+	return false;
+}
+
+vector<reference<CatalogEntry>> CollectDependentViews(DuckLakeSchemaEntry &schema, ClientContext &context,
+                                                      CatalogEntry &entry) {
+	vector<reference<CatalogEntry>> dependents;
+	auto entry_name = entry.name.GetIdentifierName();
+	schema.Scan(context, CatalogType::VIEW_ENTRY, [&](CatalogEntry &view_entry) {
+		if (view_entry.type != CatalogType::VIEW_ENTRY) {
+			return;
+		}
+		// Don't treat the entry itself as a dependent of itself
+		if (&view_entry == &entry) {
+			return;
+		}
+		auto &view = view_entry.Cast<DuckLakeViewEntry>();
+		if (QueryReferencesIdentifier(view.GetQuerySQL(), entry_name)) {
+			dependents.push_back(view_entry);
+		}
+	});
+	return dependents;
+}
+
+} // namespace
+
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTransaction transaction,
                                                                     BoundCreateTableInfo &info, string table_uuid,
                                                                     string table_data_path) {
@@ -70,6 +162,19 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTrans
 	if (!HandleCreateConflict(transaction, CatalogType::TABLE_ENTRY, base_info.table.GetIdentifierName(),
 	                          base_info.on_conflict)) {
 		return nullptr;
+	}
+	// Materialize generated columns as standard columns with defaults
+	MaterializeGeneratedColumns(base_info);
+	// Store CHECK constraints as unenforced table tags (not enforced on insert/update)
+	idx_t check_idx = 0;
+	for (auto &constraint : base_info.constraints) {
+		if (constraint->type != ConstraintType::CHECK) {
+			continue;
+		}
+		auto &check = constraint->Cast<CheckConstraint>();
+		base_info.tags["check_" + to_string(check_idx)] = check.expression->ToString();
+		base_info.tags["check_dialect_" + to_string(check_idx)] = "duckdb";
+		check_idx++;
 	}
 	// reject columns with reserved DuckLake internal names when inlining is enabled
 	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
@@ -109,6 +214,7 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 	case CatalogType::MACRO_ENTRY:
+	case CatalogType::TYPE_ENTRY:
 		return true;
 	default:
 		return false;
@@ -193,7 +299,23 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateCollation(CatalogTransacti
 }
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
-	throw NotImplementedException("DuckLake does not support user-defined types");
+	// Session-scoped types only (not persisted across detach). ENUM/STRUCT allowed.
+	// Columns using ENUM still persist via enum(...) type serialization on the column.
+	switch (info.type.id()) {
+	case LogicalTypeId::ENUM:
+	case LogicalTypeId::STRUCT:
+		break;
+	default:
+		throw NotImplementedException(
+		    "DuckLake CREATE TYPE only supports ENUM and STRUCT types (session-scoped; not persisted across detach)");
+	}
+	if (!HandleCreateConflict(transaction, CatalogType::TYPE_ENTRY, info.name.GetIdentifierName(), info.on_conflict)) {
+		return nullptr;
+	}
+	auto type_entry = make_uniq<TypeCatalogEntry>(ParentCatalog(), *this, info);
+	auto result = type_entry.get();
+	types.CreateEntry(std::move(type_entry));
+	return result;
 }
 
 namespace {
@@ -364,9 +486,6 @@ void DuckLakeSchemaEntry::Scan(CatalogType type, const std::function<void(const 
 }
 
 void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
-	if (info.cascade) {
-		throw NotImplementedException("Cascade Drop not supported in DuckLake");
-	}
 	auto catalog_entry = GetEntry(GetCatalogTransaction(context), info.type, info.name);
 	if (!catalog_entry) {
 		if (info.if_not_found == OnEntryNotFound::RETURN_NULL) {
@@ -379,6 +498,36 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		                       CatalogTypeToString(catalog_entry->type), CatalogTypeToString(info.type));
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
+
+	// Session-scoped types live on the schema set (not transaction commit path)
+	if (info.type == CatalogType::TYPE_ENTRY) {
+		types.DropEntry(info.name.GetIdentifierName());
+		return;
+	}
+
+	if (info.type == CatalogType::TABLE_ENTRY || info.type == CatalogType::VIEW_ENTRY) {
+		auto dependents = CollectDependentViews(*this, context, *catalog_entry);
+		if (!dependents.empty()) {
+			if (!info.cascade) {
+				string error_string = StringUtil::Format(
+				    "Cannot drop %s \"%s\" because there are entries that depend on it\n",
+				    StringUtil::Lower(CatalogTypeToString(info.type)), info.name.GetIdentifierName());
+				for (auto &dependent : dependents) {
+					auto &dep = dependent.get();
+					error_string += StringUtil::Format(
+					    "%s \"%s\" depends on %s \"%s\".\n", StringUtil::Lower(CatalogTypeToString(dep.type)),
+					    dep.name.GetIdentifierName(), StringUtil::Lower(CatalogTypeToString(info.type)),
+					    info.name.GetIdentifierName());
+				}
+				error_string += "Use DROP...CASCADE to drop all dependents.";
+				throw CatalogException(error_string);
+			}
+			for (auto &dependent : dependents) {
+				transaction.DropEntry(dependent.get());
+			}
+		}
+	}
+
 	transaction.DropEntry(*catalog_entry);
 }
 
@@ -605,6 +754,8 @@ DuckLakeCatalogSet &DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) {
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 		return table_macros;
+	case CatalogType::TYPE_ENTRY:
+		return types;
 	default:
 		throw NotImplementedException("Unsupported catalog type %s for DuckLake", CatalogTypeToString(type));
 	}
@@ -621,6 +772,8 @@ const DuckLakeCatalogSet &DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) c
 	case CatalogType::TABLE_FUNCTION_ENTRY:
 	case CatalogType::TABLE_MACRO_ENTRY:
 		return table_macros;
+	case CatalogType::TYPE_ENTRY:
+		return types;
 	default:
 		throw NotImplementedException("Unsupported catalog type %s for DuckLake", CatalogTypeToString(type));
 	}

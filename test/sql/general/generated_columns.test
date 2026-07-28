@@ -14,7 +14,20 @@ test-env DATA_PATH {TEST_DIR}
 statement ok
 ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_generated')
 
-statement error
+# Constant generated columns are materialized as defaults
+statement ok
 CREATE TABLE ducklake.t0(c0 INT AS (1), c1 INT);
+
+statement ok
+INSERT INTO ducklake.t0(c1) VALUES (10);
+
+query II
+SELECT * FROM ducklake.t0
 ----
-does not support
+1	10
+
+# Generated columns that reference other columns are not supported
+statement error
+CREATE TABLE ducklake.t1(c1 INT, c2 INT AS (c1 + 1));
+----
+do not reference other columns
