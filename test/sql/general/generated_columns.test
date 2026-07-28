@@ -6,13 +6,8 @@ require ducklake
 
 require parquet
 
-test-env DUCKLAKE_CONNECTION {TEST_DIR}/{UUID}.db
-
-test-env DATA_PATH {TEST_DIR}
-
-
 statement ok
-ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_generated')
+ATTACH 'ducklake:{TEST_DIR}/ducklake_generated.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_generated_files')
 
 # Constant generated columns are materialized as defaults
 statement ok
@@ -26,8 +21,59 @@ SELECT * FROM ducklake.t0
 ----
 1	10
 
-# Generated columns that reference other columns are not supported
-statement error
+# Column-ref generated columns are evaluated on insert
+statement ok
 CREATE TABLE ducklake.t1(c1 INT, c2 INT AS (c1 + 1));
+
+statement ok
+INSERT INTO ducklake.t1(c1) VALUES (10), (20);
+
+query II
+SELECT * FROM ducklake.t1 ORDER BY c1
 ----
-do not reference other columns
+10	11
+20	21
+
+# Survives detach + reattach
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ducklake_generated.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_generated_files')
+
+query II
+SELECT * FROM ducklake.t1 ORDER BY c1
+----
+10	11
+20	21
+
+# Cannot update generated column directly
+statement error
+UPDATE ducklake.t1 SET c2 = 0;
+----
+generated
+
+# Updating a base column recomputes the generated column
+statement ok
+UPDATE ducklake.t1 SET c1 = 100 WHERE c1 = 10;
+
+query II
+SELECT * FROM ducklake.t1 ORDER BY c1
+----
+20	21
+100	101
+
+# INSERT providing all columns still overwrites generated (GENERATED ALWAYS)
+statement ok
+INSERT INTO ducklake.t1 VALUES (30, 999);
+
+query I
+SELECT c2 FROM ducklake.t1 WHERE c1 = 30
+----
+31
+
+# Reject references to other generated columns
+statement error
+CREATE TABLE ducklake.bad(a INT AS (1), b INT AS (a + 1));
+----
+generated

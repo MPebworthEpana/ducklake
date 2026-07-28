@@ -759,6 +759,64 @@ static void ResolveColumnRefs(unique_ptr<Expression> &expr) {
 	ExpressionIterator::EnumerateChildren(*expr, [](unique_ptr<Expression> &child) { ResolveColumnRefs(child); });
 }
 
+PhysicalOperator &DuckLakeInsert::PlanGeneratedColumnProjection(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                                DuckLakeTableEntry &table, PhysicalOperator &plan) {
+	auto &columns = table.GetColumns();
+	vector<reference<const ColumnDefinition>> generated_cols;
+	for (auto &col : columns.Physical()) {
+		auto &tags = col.Tags();
+		auto entry = tags.find("generated");
+		if (entry != tags.end()) {
+			generated_cols.push_back(col);
+		}
+	}
+	if (generated_cols.empty()) {
+		return plan;
+	}
+
+	auto binder = Binder::CreateBinder(context);
+	TableIndex table_index(0);
+	auto column_names = columns.GetColumnNames();
+	auto column_types = columns.GetColumnTypes();
+	binder->bind_context.AddGenericBinding(table_index, table.name, StringsToIdentifiers(column_names), column_types);
+
+	vector<unique_ptr<Expression>> select_list;
+	vector<LogicalType> types;
+	idx_t physical_count = columns.PhysicalColumnCount();
+	if (plan.types.size() < physical_count) {
+		throw InternalException("PlanGeneratedColumnProjection: child plan has fewer columns than table");
+	}
+
+	for (auto &col : columns.Physical()) {
+		auto &tags = col.Tags();
+		auto entry = tags.find("generated");
+		if (entry == tags.end()) {
+			select_list.push_back(make_uniq<BoundReferenceExpression>(col.Type(), col.Physical().index));
+			types.push_back(col.Type());
+			continue;
+		}
+		auto parsed = Parser::ParseExpressionList(entry->second);
+		if (parsed.size() != 1) {
+			throw BinderException("Generated column \"%s\" expression is invalid", col.Name().GetIdentifierName());
+		}
+		ExpressionBinder expr_binder(*binder, context);
+		auto target_type = col.Type();
+		auto bound_expr = expr_binder.Bind(parsed[0], &target_type);
+		ResolveColumnRefs(bound_expr);
+		select_list.push_back(std::move(bound_expr));
+		types.push_back(col.Type());
+	}
+	// Pass through any trailing columns (e.g. row_id on the update path)
+	for (idx_t i = physical_count; i < plan.types.size(); i++) {
+		select_list.push_back(make_uniq<BoundReferenceExpression>(plan.types[i], i));
+		types.push_back(plan.types[i]);
+	}
+
+	auto &proj = planner.Make<PhysicalProjection>(std::move(types), std::move(select_list), plan.estimated_cardinality);
+	proj.children.push_back(plan);
+	return proj;
+}
+
 static optional_ptr<PhysicalOperator> PlanInsertSort(ClientContext &context, PhysicalPlanGenerator &planner,
                                                      PhysicalOperator &plan, DuckLakeTableEntry &table,
                                                      optional_ptr<DuckLakeSort> sort_data) {
@@ -805,6 +863,7 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
 		plan = planner.ResolveDefaultsProjection(op, *plan);
 	}
 	auto &ducklake_table = op.table.Cast<DuckLakeTableEntry>();
+	plan = DuckLakeInsert::PlanGeneratedColumnProjection(context, planner, ducklake_table, *plan);
 
 	// Sort data according to the table's SET SORTED BY configuration
 	auto sort_data = ducklake_table.GetSortData();

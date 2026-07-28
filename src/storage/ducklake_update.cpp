@@ -303,8 +303,9 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
 	copy_input.virtual_columns = InsertVirtualColumns::WRITE_ROW_ID;
 	auto &update_op = DuckLakeUpdate::PlanUpdateOperator(context, planner, op, child_plan, copy_input);
 
-	// follow the insert path for inlining
-	optional_ptr<PhysicalOperator> plan = &update_op;
+	// Recompute generated columns from expressions after applying SET clauses
+	optional_ptr<PhysicalOperator> plan =
+	    &DuckLakeInsert::PlanGeneratedColumnProjection(context, planner, table, update_op);
 	optional_ptr<DuckLakeInlineData> inline_data;
 
 	idx_t data_inlining_row_limit = GetInliningLimit(context, table);
@@ -326,6 +327,14 @@ void DuckLakeTableEntry::BindUpdateConstraints(Binder &binder, LogicalGet &get, 
                                                LogicalUpdate &update, ClientContext &context) {
 	// all updates in DuckLake are deletes + inserts
 	update.update_is_del_and_insert = true;
+
+	// Reject direct updates of generated columns before expanding to all physical columns
+	for (auto &col_idx : update.columns) {
+		auto &col = columns.GetColumn(col_idx);
+		if (col.Tags().find("generated") != col.Tags().end()) {
+			throw BinderException("Cannot update generated column \"%s\"", col.Name().GetIdentifierName());
+		}
+	}
 
 	// push projections for all columns that are not projected yet
 	// FIXME: this is almost a copy of LogicalUpdate::BindExtraColumns aside from the duplicate elimination

@@ -7,7 +7,11 @@
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/constraints/check_constraint.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_table_entry.hpp"
@@ -69,10 +73,11 @@ namespace {
 
 void MaterializeGeneratedColumns(CreateTableInfo &info) {
 	bool has_generated = false;
+	case_insensitive_set_t generated_names;
 	for (auto &col : info.columns.Logical()) {
 		if (col.Generated()) {
 			has_generated = true;
-			break;
+			generated_names.insert(col.Name().GetIdentifierName());
 		}
 	}
 	if (!has_generated) {
@@ -84,24 +89,52 @@ void MaterializeGeneratedColumns(CreateTableInfo &info) {
 			new_columns.AddColumn(col.Copy());
 			continue;
 		}
+		auto &gen_expr = col.GeneratedExpression();
 		bool has_column_ref = false;
-		ParsedExpressionIterator::VisitExpressionClass(
-		    col.GeneratedExpression(), ExpressionClass::COLUMN_REF,
-		    [&](const ParsedExpression &) { has_column_ref = true; });
-		if (has_column_ref) {
-			throw NotImplementedException(
-			    "DuckLake only supports generated columns that do not reference other columns "
-			    "(materialized as defaults)");
-		}
+		ParsedExpressionIterator::VisitExpressionClass(gen_expr, ExpressionClass::COLUMN_REF,
+		                                               [&](const ParsedExpression &expr) {
+			                                               has_column_ref = true;
+			                                               auto &colref = expr.Cast<ColumnRefExpression>();
+			                                               if (colref.IsQualified()) {
+				                                               throw BinderException(
+				                                                   "Generated column \"%s\" cannot reference "
+				                                                   "qualified column \"%s\"",
+				                                                   col.Name().GetIdentifierName(), colref.ToString());
+			                                               }
+			                                               auto &ref_name = colref.GetColumnName();
+			                                               if (!info.columns.ColumnExists(ref_name)) {
+				                                               throw BinderException(
+				                                                   "Generated column \"%s\" references unknown "
+				                                                   "column \"%s\"",
+				                                                   col.Name().GetIdentifierName(),
+				                                                   ref_name.GetIdentifierName());
+			                                               }
+			                                               if (StringUtil::CIEquals(ref_name.GetIdentifierName(),
+			                                                                       col.Name().GetIdentifierName())) {
+				                                               throw BinderException(
+				                                                   "Generated column \"%s\" cannot reference itself",
+				                                                   col.Name().GetIdentifierName());
+			                                               }
+			                                               if (generated_names.count(ref_name.GetIdentifierName())) {
+				                                               throw BinderException(
+				                                                   "Generated column \"%s\" cannot reference "
+				                                                   "generated column \"%s\"",
+				                                                   col.Name().GetIdentifierName(),
+				                                                   ref_name.GetIdentifierName());
+			                                               }
+		                                               });
 		ColumnDefinition new_col(col.Name(), col.Type());
-		new_col.SetDefaultValue(col.GeneratedExpression().Copy());
+		// Constant generated expressions become defaults; column-ref expressions are filled at insert time.
+		if (!has_column_ref) {
+			new_col.SetDefaultValue(gen_expr.Copy());
+		}
 		auto tags = col.Tags();
-		tags["generated"] = col.GeneratedExpression().ToString();
+		tags["generated"] = gen_expr.ToString();
 		new_col.SetTags(std::move(tags));
 		if (!col.Comment().IsNull()) {
 			new_col.SetComment(col.Comment());
 		}
-		info.tags["generated:" + col.Name().GetIdentifierName()] = col.GeneratedExpression().ToString();
+		info.tags["generated:" + col.Name().GetIdentifierName()] = gen_expr.ToString();
 		new_columns.AddColumn(std::move(new_col));
 	}
 	info.columns = std::move(new_columns);

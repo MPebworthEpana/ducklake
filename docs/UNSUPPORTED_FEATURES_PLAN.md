@@ -222,33 +222,28 @@ must be materialized (no `VIRTUAL`).
 
 ### Reasonable scope
 
-Support **STORED** only:
+Support **STORED** only (DuckDB `AS (expr)` / VIRTUAL syntax is treated as materialize/store):
 
-- Compute expression on INSERT/UPDATE/MERGE.
+- Compute expression on INSERT (and recompute on UPDATE of base columns).
 - Persist value in Parquet / inlined data like a normal column.
-- Reject `VIRTUAL` generated columns explicitly.
+- Reject direct `UPDATE` of generated columns.
+- Reject references to other generated columns (no cycles).
 
 ### Spec / metadata
 
-Reuse expression-default machinery:
-
-- `default_value` / `default_value_type='expression'` / `default_value_dialect`
-- Plus column tag `generated=stored` (or `column_type` qualifier)
-
-Do **not** invent a second expression dialect system.
+- Constant generated: `default_value` expression + column tag `generated=<expr>` + table tag `generated:<col>=<expr>`
+- Column-ref generated: column/table tags only (no default — ConstantBinder cannot bind column refs)
 
 ### Extension fix
 
-1. Remove generated-column hard reject in `DuckLakeTableEntry` ctor for STORED.
-2. On write paths, ensure omitted generated cols are filled from expression.
-3. Disallow updating generated columns directly (or only via `UPDATE` of base cols + recompute).
-4. Migration script: `CREATE TABLE … AS SELECT` already materializes — also emit STORED
-   definitions when expression is recoverable from DuckDB catalog.
+1. `MaterializeGeneratedColumns` converts GENERATED → STANDARD physical columns with tags.
+2. `PlanGeneratedColumnProjection` evaluates tagged expressions after defaults on INSERT/UPDATE.
+3. `BindUpdateConstraints` rejects SET on generated columns; base-col UPDATE recomputes via projection.
 
 ### Exit criteria
 
-`CREATE TABLE t(a INT, b INT GENERATED ALWAYS AS (a+1) STORED); INSERT INTO t(a) VALUES (1);`
-returns `b=2` after checkpoint/reattach.
+`CREATE TABLE t(a INT, b INT AS (a+1)); INSERT INTO t(a) VALUES (1);` returns `b=2`
+after checkpoint/reattach. `UPDATE t SET a = 10` recomputes `b`; `UPDATE t SET b = …` errors.
 
 ---
 
@@ -395,7 +390,7 @@ unenforced constraint metadata. Never enforce PK/FK in DuckLake.
 | **U0** | Done | `ADD COLUMN … DEFAULT expr` backfills NULL; `UPDATE … SET DEFAULT` resolves bound defaults |
 | **U1** | Done | `array(N)` type + nested child `element`; postgres/sqlite inline as VARCHAR |
 | **U2** | Done | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT persists via schema tags `udt:<name>` |
-| **U3** | Done (partial) | Constant generated columns materialize as defaults; column-ref expressions rejected |
+| **U3** | Done | Constant + column-ref generated columns materialize as physical cols; evaluated on INSERT/UPDATE; direct UPDATE of generated cols rejected |
 | **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
 | **U5** | Done | Unenforced `CHECK` stored as `check_*` table tags; not validated on write |
 
