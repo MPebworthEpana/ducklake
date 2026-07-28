@@ -26,7 +26,7 @@ SELECT typeof(h) FROM ducklake.test LIMIT 1
 ----
 ENUM('world', 'hello')
 
-# Session-scoped CREATE TYPE (ENUM); not persisted across detach
+# Persisted CREATE TYPE (ENUM)
 statement ok
 CREATE TYPE ducklake.mood AS ENUM ('happy', 'sad');
 
@@ -59,14 +59,61 @@ SELECT typeof(h) FROM ducklake.test LIMIT 1
 ----
 ENUM('world', 'hello')
 
-# Column ENUM physical type persists via enum(...) serialization even though CREATE TYPE does not
+# Column ENUM physical type and named CREATE TYPE both persist across detach
 query I
 SELECT * FROM ducklake.moods ORDER BY m
 ----
 happy
 sad
 
-# Named type is session-scoped and gone after reattach
+query I
+SELECT 'happy'::ducklake.mood;
+----
+happy
+
+# Persisted CREATE TYPE (STRUCT)
+statement ok
+CREATE TYPE ducklake.point AS STRUCT(x INT, y INT);
+
+statement ok
+CREATE TABLE ducklake.pts(p ducklake.point);
+
+statement ok
+INSERT INTO ducklake.pts VALUES ({'x': 1, 'y': 2});
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+
+query II
+SELECT p.x, p.y FROM ducklake.pts;
+----
+1	2
+
+query I
+SELECT typeof(p) FROM ducklake.pts;
+----
+STRUCT(x INTEGER, y INTEGER)
+
+# DROP TYPE removes the named type across reattach
+statement ok
+DROP TYPE ducklake.mood;
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+
 statement error
 SELECT 'happy'::ducklake.mood;
 ----
+
+# Column data using the physical ENUM still works after DROP TYPE
+query I
+SELECT * FROM ducklake.moods ORDER BY m
+----
+happy
+sad

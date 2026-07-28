@@ -31,6 +31,9 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "common/ducklake_util.hpp"
+#include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
+#include "duckdb/common/types.hpp"
 
 namespace duckdb {
 
@@ -529,6 +532,27 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		schema_info.schema = Identifier(schema.name);
 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
 		                                                   std::move(schema.path));
+		// Reload user-defined types persisted as schema tags (key = udt:<name>)
+		auto context_ref = transaction.context.lock();
+		if (context_ref) {
+			for (auto &tag : schema.tags) {
+				if (!StringUtil::StartsWith(tag.key, "udt:") || tag.key.size() <= 4) {
+					continue;
+				}
+				string type_name = tag.key.substr(4);
+				try {
+					auto logical_type = TransformStringToLogicalType(tag.value, *context_ref);
+					if (logical_type.id() == LogicalTypeId::ENUM) {
+						logical_type.SetAlias(type_name);
+					}
+					CreateTypeInfo type_info(type_name, logical_type);
+					auto type_entry = make_uniq<TypeCatalogEntry>(*this, *schema_entry, type_info);
+					schema_entry->AddEntry(CatalogType::TYPE_ENTRY, std::move(type_entry));
+				} catch (...) {
+					// Skip unparseable UDT tags (e.g. from other dialects)
+				}
+			}
+		}
 		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
 	}
 

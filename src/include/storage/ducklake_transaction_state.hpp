@@ -226,6 +226,9 @@ public:
 	set<TableIndex> tables_deleted_from;
 	unique_ptr<DuckLakeCatalogSet> new_schemas;
 	map<SchemaIndex, reference<DuckLakeSchemaEntry>> dropped_schemas;
+	//! User-defined types persisted as ducklake_tag on the schema object_id (key=udt:<name>).
+	vector<DuckLakeTagInfo> new_udt_tags;
+	vector<DuckLakeTagInfo> dropped_udt_tags; // id=schema_id, key=udt:name (value unused)
 	LocalTableChanges local_changes;
 	vector<FlushedInlinedTableInfo> flushed_inlined_tables;
 };

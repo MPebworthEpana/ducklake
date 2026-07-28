@@ -28,6 +28,8 @@ enum class ChangeType {
 	CREATED_TABLE_MACRO,
 	DROPPED_SCALAR_MACRO,
 	DROPPED_TABLE_MACRO,
+	CREATED_TYPE,
+	DROPPED_TYPE,
 	MERGED_BRANCH
 };
 
@@ -87,6 +89,10 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE;
 	} else if (StringUtil::CIEquals(change_type_str, "merged_branch")) {
 		return ChangeType::MERGED_BRANCH;
+	} else if (StringUtil::CIEquals(change_type_str, "created_type")) {
+		return ChangeType::CREATED_TYPE;
+	} else if (StringUtil::CIEquals(change_type_str, "dropped_type")) {
+		return ChangeType::DROPPED_TYPE;
 	} else {
 		throw InvalidInputException("Unsupported change type %s", change_type_str);
 	}
@@ -218,6 +224,10 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::MERGED_BRANCH:
 			result.merged_branches.insert(entry.change_value);
+			break;
+		case ChangeType::CREATED_TYPE:
+		case ChangeType::DROPPED_TYPE:
+			// Schema-version-only markers for CREATE/DROP TYPE; no conflict tracking yet.
 			break;
 		default:
 			throw InternalException("Unsupported change type in ParseChangesMade");

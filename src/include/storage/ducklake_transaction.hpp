@@ -267,6 +267,10 @@ public:
 	void DropView(DuckLakeViewEntry &view);
 	void DropScalarMacro(DuckLakeScalarMacroEntry &macro);
 	void DropTableMacro(DuckLakeTableMacroEntry &macro);
+	//! Persist a CREATE TYPE as a schema tag (key=udt:<name>, value=LogicalType::ToString()).
+	void RegisterUserType(SchemaIndex schema_id, const string &type_name, const string &type_sql);
+	//! End-snapshot a previously persisted user type tag on DROP TYPE.
+	void UnregisterUserType(SchemaIndex schema_id, const string &type_name);
 	void DropFile(TableIndex table_id, DataFileIndex data_file_id, string path, idx_t row_count, idx_t file_size_bytes);
 
 	void DeleteSnapshots(const vector<DuckLakeSnapshotInfo> &snapshots);

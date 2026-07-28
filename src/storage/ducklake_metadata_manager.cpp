@@ -4382,12 +4382,23 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::BuildCatalogForSnapshot(
     DuckLakeSnapshot snapshot, const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
     const string &base_data_path, const string &separator, bool load_view_column_tags) {
 	DuckLakeCatalogInfo catalog;
-	// load the schema information
-	auto result = query_executor(snapshot, R"(
-SELECT schema_id, schema_uuid::VARCHAR, schema_name, path, path_is_relative
+	// load the schema information (including tags used for persisted CREATE TYPE)
+	static const vector<pair<string, string>> SCHEMA_TAG_FIELDS = {
+	    {"key", "key"},
+	    {"value", "value"},
+	};
+	auto result = query_executor(snapshot, StringUtil::Format(R"(
+SELECT schema_id, schema_uuid::VARCHAR, schema_name, path, path_is_relative,
+	(
+		SELECT %s
+		FROM {METADATA_CATALOG}.ducklake_tag tag
+		WHERE object_id=schema_id AND
+		      {VISIBLE_TAG}
+	) AS tag
 FROM {METADATA_CATALOG}.ducklake_schema sch
 WHERE {VISIBLE_SCHEMA}
-)");
+)",
+	                                                          ListAggregation(SCHEMA_TAG_FIELDS)));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get schema information from DuckLake: ");
 	}
@@ -4407,6 +4418,10 @@ WHERE {VISIBLE_SCHEMA}
 			path.path_is_relative = row.GetValue<bool>(4);
 
 			schema.path = FromRelativePath(path, base_data_path, separator);
+		}
+		if (!row.IsNull(5)) {
+			auto tags = row.GetValue<Value>(5);
+			schema.tags = LoadTags(tags);
 		}
 		schema_map[schema.id] = catalog.schemas.size();
 		catalog.schemas.push_back(std::move(schema));
@@ -8855,6 +8870,29 @@ WHERE object_id=tid AND ducklake_tag.key=overwritten_tags.key AND end_snapshot I
 	new_tag_query = "INSERT INTO {METADATA_CATALOG}.ducklake_tag VALUES " + new_tag_query + ";";
 	batch_query += new_tag_query;
 	return batch_query;
+}
+
+string DuckLakeMetadataManager::DropTags(const vector<DuckLakeTagInfo> &tags) {
+	if (tags.empty()) {
+		return {};
+	}
+	string tags_list;
+	for (auto &tag : tags) {
+		if (!tags_list.empty()) {
+			tags_list += ", ";
+		}
+		tags_list += StringUtil::Format("(%d, %s)", tag.id, SQLString(tag.key));
+	}
+	return StringUtil::Format(R"(
+WITH dropped_tags(tid, key) AS (
+VALUES %s
+)
+UPDATE {METADATA_CATALOG}.ducklake_tag
+SET end_snapshot = {SNAPSHOT_ID}
+FROM dropped_tags
+WHERE object_id=tid AND ducklake_tag.key=dropped_tags.key AND end_snapshot IS NULL
+;)",
+	                          tags_list);
 }
 
 template <class T, class OverwrittenValues, class NewValues>

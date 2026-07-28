@@ -299,15 +299,13 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateCollation(CatalogTransacti
 }
 
 optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
-	// Session-scoped types only (not persisted across detach). ENUM/STRUCT allowed.
-	// Columns using ENUM still persist via enum(...) type serialization on the column.
+	// ENUM/STRUCT CREATE TYPE is persisted as a schema tag (udt:<name>) and reloaded on attach.
 	switch (info.type.id()) {
 	case LogicalTypeId::ENUM:
 	case LogicalTypeId::STRUCT:
 		break;
 	default:
-		throw NotImplementedException(
-		    "DuckLake CREATE TYPE only supports ENUM and STRUCT types (session-scoped; not persisted across detach)");
+		throw NotImplementedException("DuckLake CREATE TYPE only supports ENUM and STRUCT types");
 	}
 	if (!HandleCreateConflict(transaction, CatalogType::TYPE_ENTRY, info.name.GetIdentifierName(), info.on_conflict)) {
 		return nullptr;
@@ -315,6 +313,12 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction tr
 	auto type_entry = make_uniq<TypeCatalogEntry>(ParentCatalog(), *this, info);
 	auto result = type_entry.get();
 	types.CreateEntry(std::move(type_entry));
+
+	// Persist physical type SQL without the alias so reload parses cleanly.
+	auto type_for_sql = info.type;
+	type_for_sql.SetAlias("");
+	auto &duck_transaction = DuckLakeTransaction::Get(transaction.GetContext(), catalog);
+	duck_transaction.RegisterUserType(schema_id, info.name.GetIdentifierName(), type_for_sql.ToString());
 	return result;
 }
 
@@ -499,9 +503,9 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	}
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 
-	// Session-scoped types live on the schema set (not transaction commit path)
 	if (info.type == CatalogType::TYPE_ENTRY) {
 		types.DropEntry(info.name.GetIdentifierName());
+		transaction.UnregisterUserType(schema_id, info.name.GetIdentifierName());
 		return;
 	}
 

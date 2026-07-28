@@ -68,7 +68,8 @@ void DuckLakeTransactionState::CleanupFiles() {
 bool DuckLakeTransactionState::SchemaChangesMade() const {
 	return !new_tables.empty() || !dropped_tables.empty() || new_schemas || !dropped_schemas.empty() ||
 	       !dropped_views.empty() || !renamed_views.empty() || !new_scalar_macros.empty() ||
-	       !new_table_macros.empty() || !dropped_scalar_macros.empty() || !dropped_table_macros.empty();
+	       !new_table_macros.empty() || !dropped_scalar_macros.empty() || !dropped_table_macros.empty() ||
+	       !new_udt_tags.empty() || !dropped_udt_tags.empty();
 }
 
 namespace {
@@ -336,6 +337,30 @@ string DuckLakeTransactionState::WriteSnapshotChanges(DuckLakeCommitState &commi
 		}
 		change_info.changes_made += "dropped_table_macro:";
 		change_info.changes_made += to_string(entry.index);
+	}
+
+	// User-defined types (CREATE/DROP TYPE) persisted as schema tags
+	for (auto &tag : new_udt_tags) {
+		if (!change_info.changes_made.empty()) {
+			change_info.changes_made += ",";
+		}
+		SchemaIndex sid(tag.id);
+		commit_state.RemapIdentifier(sid);
+		change_info.changes_made += "created_type:";
+		change_info.changes_made += to_string(sid.index);
+		change_info.changes_made += ":";
+		change_info.changes_made += tag.key.size() > 4 ? tag.key.substr(4) : tag.key;
+	}
+	for (auto &tag : dropped_udt_tags) {
+		if (!change_info.changes_made.empty()) {
+			change_info.changes_made += ",";
+		}
+		SchemaIndex sid(tag.id);
+		commit_state.RemapIdentifier(sid);
+		change_info.changes_made += "dropped_type:";
+		change_info.changes_made += to_string(sid.index);
+		change_info.changes_made += ":";
+		change_info.changes_made += tag.key.size() > 4 ? tag.key.substr(4) : tag.key;
 	}
 
 	AddChangeInfo(commit_state, change_info, changes.tables_inserted_into, "inserted_into_table");
@@ -1629,6 +1654,26 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	if (!new_scalar_macros.empty() || !new_table_macros.empty()) {
 		auto result = GetNewMacros(commit_state, transaction_changes);
 		batch_queries += DuckLakeMetadataManager::WriteNewMacros(result.new_macros);
+	}
+
+	// Persist CREATE/DROP TYPE as schema tags (object_id = schema_id, key = udt:<name>)
+	if (!new_udt_tags.empty()) {
+		vector<DuckLakeTagInfo> tags = new_udt_tags;
+		for (auto &tag : tags) {
+			SchemaIndex sid(tag.id);
+			commit_state.RemapIdentifier(sid);
+			tag.id = sid.index;
+		}
+		batch_queries += DuckLakeMetadataManager::WriteNewTags(tags);
+	}
+	if (!dropped_udt_tags.empty()) {
+		vector<DuckLakeTagInfo> tags = dropped_udt_tags;
+		for (auto &tag : tags) {
+			SchemaIndex sid(tag.id);
+			commit_state.RemapIdentifier(sid);
+			tag.id = sid.index;
+		}
+		batch_queries += DuckLakeMetadataManager::DropTags(tags);
 	}
 
 	// write new name maps
