@@ -385,3 +385,19 @@ Once U1–U3 land, update the Python migrator from the docs so it:
 Implement **U0 → U1 → U2 → U3** as the “necessary” set for real DuckDB database
 migrations. Defer CHECK until there is a concrete interop consumer that needs
 unenforced constraint metadata. Never enforce PK/FK in DuckLake.
+
+---
+
+## Implementation status (this branch)
+
+| ID | Status | Notes |
+|---|---|---|
+| **U0** | Done | `ADD COLUMN … DEFAULT expr` backfills NULL; `UPDATE … SET DEFAULT` resolves bound defaults |
+| **U1** | Done | `array(N)` type + nested child `element`; postgres/sqlite inline as VARCHAR |
+| **U2** | Done (partial) | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT is session-scoped (not persisted across detach) |
+| **U3** | Done (partial) | Constant generated columns materialize as defaults; column-ref expressions rejected |
+| **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
+| **U5** | Done | Unenforced `CHECK` stored as `check_*` table tags; not validated on write |
+
+Tests: `test/sql/default/default_expressions.test`, `types/array.test`, `types/enum.test`,
+`general/generated_columns.test`, `constraints/unsupported.test`, `catalog/drop_cascade.test`.
