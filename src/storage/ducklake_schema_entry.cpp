@@ -198,7 +198,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTrans
 	}
 	// Materialize generated columns as standard columns with defaults
 	MaterializeGeneratedColumns(base_info);
-	// Store CHECK constraints as unenforced table tags (not enforced on insert/update)
+	// Store CHECK constraints as table tags (unenforced unless ducklake_enforce_checks=true)
 	idx_t check_idx = 0;
 	for (auto &constraint : base_info.constraints) {
 		if (constraint->type != ConstraintType::CHECK) {
@@ -351,7 +351,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction tr
 	auto type_for_sql = info.type;
 	type_for_sql.SetAlias("");
 	auto &duck_transaction = DuckLakeTransaction::Get(transaction.GetContext(), catalog);
-	duck_transaction.RegisterUserType(schema_id, info.name.GetIdentifierName(), type_for_sql.ToString());
+	duck_transaction.RegisterUserType(schema_id, info.name.GetIdentifierName(), type_for_sql);
 	return result;
 }
 

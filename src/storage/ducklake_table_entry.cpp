@@ -118,7 +118,7 @@ DuckLakeTableEntry::DuckLakeTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
 		switch (constraint->type) {
 		case ConstraintType::NOT_NULL:
 		case ConstraintType::CHECK:
-			// CHECK constraints are stored but not enforced
+			// CHECK constraints are stored; optionally enforced via ducklake_enforce_checks
 			break;
 		case ConstraintType::UNIQUE:
 			throw NotImplementedException("PRIMARY KEY/UNIQUE constraints are not supported in DuckLake");
@@ -1430,15 +1430,17 @@ DuckLakeColumnInfo DuckLakeTableEntry::GetColumnInfo(FieldIndex field_index) con
 	if (!field_id) {
 		throw InternalException("Field id not found in table");
 	}
-	auto &col = GetColumn(Identifier(field_id->Name()));
 	auto &col_data = field_id->GetColumnData();
 
 	DuckLakeColumnInfo result;
 	result.id = field_index;
-	result.name = col.Name().GetIdentifierName();
-	result.type = DuckLakeTypes::ToString(col.Type());
+	result.name = field_id->Name();
+	result.type = DuckLakeTypes::ToString(field_id->Type());
+	// Nested roots must persist defaults too (SET DEFAULT rewrites this single column row).
+	// Do not emit children here — committed nested children stay in place; rewriting them
+	// would duplicate field ids. Txn-local ADD COLUMN ... DEFAULT uses ConvertColumn instead.
 	ExtractDefaultValue(col_data, result);
-	result.nulls_allowed = GetNotNullFields().count(col.Name().GetIdentifierName()) == 0;
+	result.nulls_allowed = GetNotNullFields().count(field_id->Name()) == 0;
 	return result;
 }
 
@@ -1449,6 +1451,9 @@ DuckLakeColumnInfo DuckLakeTableEntry::ConvertColumn(const string &name, const L
 	column_entry.name = name;
 	column_entry.nulls_allowed = true;
 	column_entry.type = DuckLakeTypes::ToString(type);
+	// Persist defaults on nested roots as well as leaves (children keep their own defaults via recursion).
+	auto &column_data = field_id.GetColumnData();
+	ExtractDefaultValue(column_data, column_entry);
 	switch (type.id()) {
 	case LogicalTypeId::STRUCT: {
 		auto &struct_children = StructType::GetChildTypes(type);
@@ -1476,11 +1481,8 @@ DuckLakeColumnInfo DuckLakeTableEntry::ConvertColumn(const string &name, const L
 		column_entry.children.push_back(ConvertColumn("value", MapType::ValueType(type), value_id));
 		break;
 	}
-	default: {
-		auto &column_data = field_id.GetColumnData();
-		ExtractDefaultValue(column_data, column_entry);
+	default:
 		break;
-	}
 	}
 	return column_entry;
 }

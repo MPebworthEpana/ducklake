@@ -48,6 +48,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "ducklake_write_deletion_vectors",
 	    "[EXPERIMENTAL] Write Iceberg V3 deletion vectors (puffin) instead of positional delete files (parquet)",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_enforce_checks",
+	                          "Validate CHECK constraints on DuckLake writes from this engine", LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(false), nullptr, SetScope::GLOBAL);
 
 	DuckLakeSnapshotsFunction snapshots;
 	loader.RegisterFunction(snapshots);

@@ -1552,6 +1552,7 @@ void DuckLakeTransaction::RunCommitLoop(DuckLakeSnapshot transaction_snapshot,
 	context.commit_info = state->commit_info;
 	context.supports_v1_1_metadata = ducklake_catalog.SupportsRowGroupCount();
 	context.supports_writable_branches = ducklake_catalog.SupportsWritableBranches();
+	context.supports_formal_metadata = ducklake_catalog.SupportsFormalMetadata();
 	context.shared_inlining_layout = ducklake_catalog.GetInliningLayout() == "shared_table";
 	context.branch_id = GetActiveBranchId();
 	if (HasCommitPreconditions()) {
@@ -2034,19 +2035,62 @@ void DuckLakeTransaction::DropTableMacro(DuckLakeTableMacroEntry &macro) {
 	state->dropped_table_macros.insert(macro.GetIndex());
 }
 
-void DuckLakeTransaction::RegisterUserType(SchemaIndex schema_id, const string &type_name, const string &type_sql) {
+void DuckLakeTransaction::RegisterUserType(SchemaIndex schema_id, const string &type_name, const LogicalType &type) {
 	catalog_version = ducklake_catalog.GetNewUncommittedCatalogVersion();
 	string key = "udt:" + type_name;
+	auto type_sql = type.ToString();
 	// If there was a pending drop for the same key in this txn, cancel it.
 	auto &dropped = state->dropped_udt_tags;
 	dropped.erase(std::remove_if(dropped.begin(), dropped.end(),
 	                             [&](const DuckLakeTagInfo &tag) { return tag.id == schema_id.index && tag.key == key; }),
 	              dropped.end());
+	state->dropped_types.erase(
+	    std::remove_if(state->dropped_types.begin(), state->dropped_types.end(),
+	                   [&](const DuckLakeTypeInfo &info) {
+		                   return info.schema_id == schema_id && StringUtil::CIEquals(info.type_name, type_name);
+	                   }),
+	    state->dropped_types.end());
 	DuckLakeTagInfo tag;
 	tag.id = schema_id.index;
 	tag.key = std::move(key);
 	tag.value = Value(type_sql);
 	state->new_udt_tags.push_back(std::move(tag));
+
+	if (ducklake_catalog.SupportsFormalMetadata()) {
+		DuckLakeTypeInfo type_info;
+		type_info.type_id = GetLocalCatalogId();
+		type_info.type_uuid = GenerateUUID();
+		type_info.schema_id = schema_id;
+		type_info.type_name = type_name;
+		type_info.physical_type = type_sql;
+		type_info.dialect = "duckdb";
+		type_info.branch_id = GetActiveBranchId();
+		if (type.id() == LogicalTypeId::ENUM) {
+			type_info.type_class = "enum";
+			auto &values = EnumType::GetValuesInsertOrder(type);
+			auto data = FlatVector::GetData<string_t>(values);
+			auto size = EnumType::GetSize(type);
+			for (idx_t i = 0; i < size; i++) {
+				DuckLakeTypeMemberInfo member;
+				member.member_index = i;
+				member.member_name = data[i].GetString();
+				type_info.members.push_back(std::move(member));
+			}
+		} else if (type.id() == LogicalTypeId::STRUCT) {
+			type_info.type_class = "struct_alias";
+			auto &children = StructType::GetChildTypes(type);
+			for (idx_t i = 0; i < children.size(); i++) {
+				DuckLakeTypeMemberInfo member;
+				member.member_index = i;
+				member.member_name = children[i].first.GetIdentifierName();
+				member.member_type = children[i].second.ToString();
+				type_info.members.push_back(std::move(member));
+			}
+		} else {
+			type_info.type_class = "enum";
+		}
+		state->new_types.push_back(std::move(type_info));
+	}
 }
 
 void DuckLakeTransaction::UnregisterUserType(SchemaIndex schema_id, const string &type_name) {
@@ -2057,10 +2101,22 @@ void DuckLakeTransaction::UnregisterUserType(SchemaIndex schema_id, const string
 	created.erase(std::remove_if(created.begin(), created.end(),
 	                             [&](const DuckLakeTagInfo &tag) { return tag.id == schema_id.index && tag.key == key; }),
 	              created.end());
+	state->new_types.erase(std::remove_if(state->new_types.begin(), state->new_types.end(),
+	                                      [&](const DuckLakeTypeInfo &info) {
+		                                      return info.schema_id == schema_id &&
+		                                             StringUtil::CIEquals(info.type_name, type_name);
+	                                      }),
+	                       state->new_types.end());
 	DuckLakeTagInfo tag;
 	tag.id = schema_id.index;
 	tag.key = std::move(key);
 	state->dropped_udt_tags.push_back(std::move(tag));
+	if (ducklake_catalog.SupportsFormalMetadata()) {
+		DuckLakeTypeInfo type_info;
+		type_info.schema_id = schema_id;
+		type_info.type_name = type_name;
+		state->dropped_types.push_back(std::move(type_info));
+	}
 }
 
 void DuckLakeTransaction::DropFile(TableIndex table_id, DataFileIndex data_file_id, string path, idx_t row_count,

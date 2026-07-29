@@ -12,12 +12,15 @@
 #include "functions/ducklake_compaction_functions.hpp"
 
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/order/physical_order.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression_binder.hpp"
+#include "duckdb/planner/expression_binder/check_binder.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
@@ -817,6 +820,136 @@ PhysicalOperator &DuckLakeInsert::PlanGeneratedColumnProjection(ClientContext &c
 	return proj;
 }
 
+//===--------------------------------------------------------------------===//
+// CHECK constraint enforcement (ducklake_enforce_checks)
+//===--------------------------------------------------------------------===//
+static bool DuckLakeEnforceChecksEnabled(ClientContext &context) {
+	Value setting_val;
+	if (context.TryGetCurrentSetting("ducklake_enforce_checks", setting_val) && !setting_val.IsNull()) {
+		return setting_val.GetValue<bool>();
+	}
+	return false;
+}
+
+vector<unique_ptr<Expression>> DuckLakeInsert::BindCheckConstraints(ClientContext &context, DuckLakeTableEntry &table,
+                                                                    vector<string> &check_names) {
+	vector<unique_ptr<Expression>> result;
+	check_names.clear();
+	if (!DuckLakeEnforceChecksEnabled(context)) {
+		return result;
+	}
+
+	auto binder = Binder::CreateBinder(context);
+	auto &columns = table.GetColumns();
+
+	for (auto &entry : table.tags) {
+		auto &key = entry.first;
+		auto &value = entry.second;
+		if (!StringUtil::StartsWith(key, "check_") || StringUtil::StartsWith(key, "check_dialect_")) {
+			continue;
+		}
+		// Only enforce duckdb / empty dialect tags
+		auto idx_str = key.substr(6); // strlen("check_")
+		auto dialect_it = table.tags.find("check_dialect_" + idx_str);
+		if (dialect_it != table.tags.end() && !dialect_it->second.empty() &&
+		    !StringUtil::CIEquals(dialect_it->second, "duckdb")) {
+			continue;
+		}
+		unique_ptr<ParsedExpression> parsed_expr;
+		try {
+			auto parsed = Parser::ParseExpressionList(value);
+			if (parsed.size() != 1) {
+				continue;
+			}
+			parsed_expr = std::move(parsed[0]);
+		} catch (...) {
+			// Skip unparseable CHECK tags (other dialects / legacy)
+			continue;
+		}
+		try {
+			physical_index_set_t bound_columns;
+			CheckBinder check_binder(*binder, context, table.name, columns, bound_columns);
+			auto bound_expr = check_binder.Bind(parsed_expr);
+			result.push_back(std::move(bound_expr));
+			check_names.push_back("CHECK(" + value + ")");
+		} catch (...) {
+			// Skip expressions that cannot be bound in this engine
+			continue;
+		}
+	}
+	return result;
+}
+
+void DuckLakeInsert::VerifyCheckConstraints(ClientContext &context, const DuckLakeTableEntry &table,
+                                            const vector<unique_ptr<Expression>> &checks,
+                                            const vector<string> &check_names, DataChunk &chunk) {
+	D_ASSERT(checks.size() == check_names.size());
+	for (idx_t i = 0; i < checks.size(); i++) {
+		ExpressionExecutor executor(context, *checks[i]);
+		Vector result(LogicalType::INTEGER);
+		try {
+			executor.ExecuteExpression(chunk, result);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			throw ConstraintException("CHECK constraint failed on table %s with expression %s (Error: %s)", table.name,
+			                          check_names[i], error.RawMessage());
+		} catch (...) {
+			throw ConstraintException("CHECK constraint failed on table %s with expression %s (Unknown Error)",
+			                          table.name, check_names[i]);
+		}
+		for (auto entry : result.Values<int32_t>()) {
+			if (entry.IsValid() && entry.GetValue() == 0) {
+				throw ConstraintException("CHECK constraint failed on table %s with expression %s", table.name,
+				                          check_names[i]);
+			}
+		}
+	}
+}
+
+class DuckLakeCheckConstraints : public PhysicalOperator {
+public:
+	DuckLakeCheckConstraints(PhysicalPlan &physical_plan, PhysicalOperator &child, DuckLakeTableEntry &table,
+	                         vector<unique_ptr<Expression>> checks_p, vector<string> check_names_p)
+	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, child.types, child.estimated_cardinality),
+	      table(table), checks(std::move(checks_p)), check_names(std::move(check_names_p)) {
+		children.push_back(child);
+	}
+
+	DuckLakeTableEntry &table;
+	vector<unique_ptr<Expression>> checks;
+	vector<string> check_names;
+
+public:
+	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override {
+		return make_uniq<OperatorState>();
+	}
+
+	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
+	                           GlobalOperatorState &gstate, OperatorState &state) const override {
+		DuckLakeInsert::VerifyCheckConstraints(context.client, table, checks, check_names, input);
+		chunk.Reference(input);
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+
+	bool ParallelOperator() const override {
+		return true;
+	}
+
+	string GetName() const override {
+		return "DUCKLAKE_CHECK";
+	}
+};
+
+PhysicalOperator &DuckLakeInsert::PlanCheckConstraintVerification(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                                  DuckLakeTableEntry &table, PhysicalOperator &plan) {
+	vector<string> check_names;
+	auto checks = BindCheckConstraints(context, table, check_names);
+	if (checks.empty()) {
+		return plan;
+	}
+	return planner.Make<DuckLakeCheckConstraints>(plan, table, std::move(checks), std::move(check_names));
+}
+
 static optional_ptr<PhysicalOperator> PlanInsertSort(ClientContext &context, PhysicalPlanGenerator &planner,
                                                      PhysicalOperator &plan, DuckLakeTableEntry &table,
                                                      optional_ptr<DuckLakeSort> sort_data) {
@@ -864,6 +997,7 @@ PhysicalOperator &DuckLakeCatalog::PlanInsert(ClientContext &context, PhysicalPl
 	}
 	auto &ducklake_table = op.table.Cast<DuckLakeTableEntry>();
 	plan = DuckLakeInsert::PlanGeneratedColumnProjection(context, planner, ducklake_table, *plan);
+	plan = DuckLakeInsert::PlanCheckConstraintVerification(context, planner, ducklake_table, *plan);
 
 	// Sort data according to the table's SET SORTED BY configuration
 	auto sort_data = ducklake_table.GetSortData();

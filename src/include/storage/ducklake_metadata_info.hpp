@@ -86,6 +86,39 @@ struct DuckLakeColumnInfo {
 	bool nulls_allowed {};
 	vector<DuckLakeColumnInfo> children;
 	vector<DuckLakeTag> tags;
+	//! Formal generated-column metadata (F3e); dual-read with column tag "generated".
+	bool is_generated = false;
+	string generated_expression;
+	string generated_dialect;
+};
+
+struct DuckLakeTypeMemberInfo {
+	idx_t member_index = 0;
+	string member_name;
+	//! Struct field type SQL; empty/NULL for enum labels.
+	string member_type;
+};
+
+struct DuckLakeTypeInfo {
+	idx_t type_id = 0;
+	string type_uuid;
+	SchemaIndex schema_id;
+	string type_name;
+	string type_class; // 'enum' | 'struct_alias'
+	string physical_type;
+	string dialect = "duckdb";
+	idx_t branch_id = 0;
+	vector<DuckLakeTypeMemberInfo> members;
+};
+
+struct DuckLakeConstraintInfo {
+	TableIndex table_id;
+	idx_t constraint_id = 0;
+	string constraint_type; // 'check'
+	string expression;
+	string dialect = "duckdb";
+	bool enforced = false;
+	idx_t branch_id = 0;
 };
 
 struct DuckLakeInlinedTableInfo {
@@ -373,6 +406,8 @@ struct DuckLakeCatalogInfo {
 	vector<DuckLakeMacroInfo> macros;
 	vector<DuckLakePartitionInfo> partitions;
 	vector<DuckLakeSortInfo> sorts;
+	vector<DuckLakeTypeInfo> types;
+	vector<DuckLakeConstraintInfo> constraints;
 };
 
 struct DuckLakeFileData {

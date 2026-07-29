@@ -3,6 +3,7 @@
 #include "duckdb/common/exception/catalog_exception.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/parsed_expression_iterator.hpp"
 
 namespace duckdb {
 
@@ -51,6 +52,12 @@ static unique_ptr<ParsedExpression> ExtractDefaultExpression(optional_ptr<const 
 	if (default_expr->IsWindow()) {
 		throw NotImplementedException("Expressions with window functions are not yet supported as default expressions");
 	}
+	bool has_column_ref = false;
+	ParsedExpressionIterator::VisitExpressionClass(*default_expr, ExpressionClass::COLUMN_REF,
+	                                               [&](const ParsedExpression &) { has_column_ref = true; });
+	if (has_column_ref) {
+		throw NotImplementedException("Column references are not supported in default expressions");
+	}
 	return default_expr->Copy();
 }
 
@@ -76,10 +83,6 @@ unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromType(const string &name,
 	vector<unique_ptr<DuckLakeFieldId>> field_children;
 	switch (type.id()) {
 	case LogicalTypeId::STRUCT: {
-		// FIXME: check for struct pack
-		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-			throw NotImplementedException("Only constant default values are supported for STRUCT type");
-		}
 		for (auto &entry : StructType::GetChildTypes(type)) {
 			field_children.push_back(
 			    FieldIdFromType(entry.first.GetIdentifierName(), entry.second, nullptr, column_id, add_column));
@@ -87,23 +90,14 @@ unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromType(const string &name,
 		break;
 	}
 	case LogicalTypeId::LIST:
-		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-			throw NotImplementedException("Only constant default values are supported for LIST type");
-		}
 		field_children.push_back(
 		    FieldIdFromType("element", ListType::GetChildType(type), nullptr, column_id, add_column));
 		break;
 	case LogicalTypeId::ARRAY:
-		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-			throw NotImplementedException("Only constant default values are supported for ARRAY type");
-		}
 		field_children.push_back(
 		    FieldIdFromType("element", ArrayType::GetChildType(type), nullptr, column_id, add_column));
 		break;
 	case LogicalTypeId::MAP:
-		if (default_expr && default_expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-			throw NotImplementedException("Only constant default values are supported for MAP type");
-		}
 		field_children.push_back(FieldIdFromType("key", MapType::KeyType(type), nullptr, column_id, add_column));
 		field_children.push_back(FieldIdFromType("value", MapType::ValueType(type), nullptr, column_id, add_column));
 		break;
@@ -112,7 +106,8 @@ unique_ptr<DuckLakeFieldId> DuckLakeFieldId::FieldIdFromType(const string &name,
 	}
 	column_data.initial_default = ExtractInitialValue(default_expr, type, add_column);
 	if (default_expr) {
-		column_data.default_value = default_expr->Copy();
+		// Validate (no subquery/window/column-ref) and persist the default expression for nested roots too.
+		column_data.default_value = ExtractDefaultExpression(default_expr, type);
 	}
 
 	return make_uniq<DuckLakeFieldId>(std::move(column_data), name, type, std::move(field_children));

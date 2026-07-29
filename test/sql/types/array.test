@@ -6,8 +6,13 @@ require ducklake
 
 require parquet
 
+# Use BASE_TEST_NAME (stable) — {UUID} is regenerated on every path expansion and breaks detach/reattach
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_array.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_array_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_array_files')
 
 statement ok
 CREATE TABLE ducklake.test(a INTEGER[3]);
@@ -30,7 +35,7 @@ statement ok
 DETACH ducklake
 
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_array.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_array_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_array_files')
 
 query I
 SELECT * FROM ducklake.test ORDER BY a[1]

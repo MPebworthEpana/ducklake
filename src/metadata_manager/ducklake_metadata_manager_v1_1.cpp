@@ -95,6 +95,19 @@ string DuckLakeMetadataManagerV1_1<Base>::GetCreateTableStatements() {
 		result +=
 		    "INSERT INTO {METADATA_CATALOG}.ducklake_ref_log VALUES (0, 0, 'main', 'branch', NULL, 0, 'create', NOW());\n";
 	}
+	if (version >= DuckLakeVersion::V1_1_DEV_6) {
+		result += "CREATE TABLE {METADATA_CATALOG}.ducklake_type(type_id BIGINT, type_uuid UUID, begin_snapshot "
+		          "BIGINT, end_snapshot BIGINT, schema_id BIGINT, type_name VARCHAR, type_class VARCHAR, "
+		          "physical_type VARCHAR, dialect VARCHAR, branch_id BIGINT DEFAULT 0);\n";
+		result += "CREATE TABLE {METADATA_CATALOG}.ducklake_type_member(type_id BIGINT, member_index INTEGER, "
+		          "member_name VARCHAR, member_type VARCHAR);\n";
+		result += "CREATE TABLE {METADATA_CATALOG}.ducklake_table_constraint(table_id BIGINT, constraint_id BIGINT, "
+		          "begin_snapshot BIGINT, end_snapshot BIGINT, constraint_type VARCHAR, expression VARCHAR, "
+		          "dialect VARCHAR, enforced BOOLEAN, branch_id BIGINT DEFAULT 0);\n";
+		result += "ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN is_generated BOOLEAN DEFAULT FALSE;\n";
+		result += "ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN generated_expression VARCHAR;\n";
+		result += "ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN generated_dialect VARCHAR;\n";
+	}
 	return result;
 }
 

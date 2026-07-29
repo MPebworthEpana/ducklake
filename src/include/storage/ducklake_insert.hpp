@@ -89,6 +89,16 @@ public:
 	//! Extra trailing columns (e.g. row_id for updates) are passed through unchanged.
 	static PhysicalOperator &PlanGeneratedColumnProjection(ClientContext &context, PhysicalPlanGenerator &planner,
 	                                                       DuckLakeTableEntry &table, PhysicalOperator &plan);
+	//! When ducklake_enforce_checks is enabled, insert a streaming operator that validates CHECK constraints.
+	static PhysicalOperator &PlanCheckConstraintVerification(ClientContext &context, PhysicalPlanGenerator &planner,
+	                                                         DuckLakeTableEntry &table, PhysicalOperator &plan);
+	//! Bind enforceable CHECK expressions for the table (empty when enforcement is off or none apply).
+	static vector<unique_ptr<Expression>> BindCheckConstraints(ClientContext &context, DuckLakeTableEntry &table,
+	                                                            vector<string> &check_names);
+	//! Evaluate bound CHECK expressions against a chunk; throws ConstraintException on failure.
+	static void VerifyCheckConstraints(ClientContext &context, const DuckLakeTableEntry &table,
+	                                   const vector<unique_ptr<Expression>> &checks, const vector<string> &check_names,
+	                                   DataChunk &chunk);
 	static void AddWrittenFiles(DuckLakeInsertGlobalState &gstate, DataChunk &chunk, const string &encryption_key,
 	                            optional_idx partition_id, bool set_snapshot_id = false);
 

@@ -1,0 +1,136 @@
+# name: test/sql/catalog/formal_metadata.test
+# description: Formal ducklake_type / ducklake_table_constraint / generated column metadata (F3c–F3e)
+# group: [catalog]
+
+require ducklake
+
+require parquet
+
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/formal_metadata_files', METADATA_CATALOG 'xx')
+
+# CREATE TYPE writes formal ducklake_type (+ members) and dual-writes udt:* tags
+statement ok
+CREATE TYPE ducklake.mood AS ENUM ('happy', 'sad');
+
+statement ok
+CREATE TYPE ducklake.point AS STRUCT(x INT, y INT);
+
+query III
+SELECT type_name, type_class, physical_type FROM xx.ducklake_type WHERE end_snapshot IS NULL ORDER BY type_name
+----
+mood	enum	ENUM('happy', 'sad')
+point	struct_alias	STRUCT(x INTEGER, y INTEGER)
+
+query III
+SELECT t.type_name, m.member_index, m.member_name
+FROM xx.ducklake_type t
+JOIN xx.ducklake_type_member m USING (type_id)
+WHERE t.end_snapshot IS NULL
+ORDER BY t.type_name, m.member_index
+----
+mood	0	happy
+mood	1	sad
+point	0	x
+point	1	y
+
+# CHECK constraints write formal ducklake_table_constraint and dual-write check_* tags
+statement ok
+CREATE TABLE ducklake.checked(i INTEGER, j INTEGER, CHECK (i > j));
+
+query III
+SELECT constraint_type, expression, dialect FROM xx.ducklake_table_constraint WHERE end_snapshot IS NULL ORDER BY constraint_id
+----
+check	(i > j)	duckdb
+
+# Generated columns write formal generated_* fields and dual-write tags
+statement ok
+CREATE TABLE ducklake.gen(c1 INT, c2 INT AS (c1 + 1));
+
+query III
+SELECT column_name, is_generated, generated_expression
+FROM xx.ducklake_column
+WHERE end_snapshot IS NULL AND is_generated
+ORDER BY column_name
+----
+c2	true	CAST((c1 + 1) AS INTEGER)
+
+# Dual-written generated tag should match the formal expression
+query I
+SELECT value FROM xx.ducklake_column_tag WHERE key = 'generated' AND end_snapshot IS NULL
+----
+CAST((c1 + 1) AS INTEGER)
+
+# Functional use still works
+statement ok
+CREATE TABLE ducklake.moods(m ducklake.mood);
+
+statement ok
+INSERT INTO ducklake.moods VALUES ('happy'), ('sad');
+
+statement ok
+INSERT INTO ducklake.gen(c1) VALUES (10);
+
+statement ok
+INSERT INTO ducklake.checked VALUES (5, 1);
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/formal_metadata_files', METADATA_CATALOG 'xx')
+
+# Types / CHECK / generated survive detach-reattach
+query I
+SELECT * FROM ducklake.moods ORDER BY m
+----
+happy
+sad
+
+query I
+SELECT 'happy'::ducklake.mood;
+----
+happy
+
+query II
+SELECT * FROM ducklake.gen
+----
+10	11
+
+query II
+SELECT * FROM ducklake.checked
+----
+5	1
+
+# Formal metadata still present after reattach
+query I
+SELECT count(*) FROM xx.ducklake_type WHERE end_snapshot IS NULL
+----
+2
+
+query I
+SELECT count(*) FROM xx.ducklake_table_constraint WHERE end_snapshot IS NULL
+----
+1
+
+query I
+SELECT count(*) FROM xx.ducklake_column WHERE end_snapshot IS NULL AND is_generated
+----
+1
+
+# DROP TYPE end-snapshots the formal row
+statement ok
+DROP TYPE ducklake.mood;
+
+query I
+SELECT count(*) FROM xx.ducklake_type WHERE type_name = 'mood' AND end_snapshot IS NULL
+----
+0
+
+statement error
+SELECT 'happy'::ducklake.mood;
+----

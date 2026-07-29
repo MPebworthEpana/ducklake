@@ -241,7 +241,8 @@ public:
 	static DuckLakeCatalogInfo
 	BuildCatalogForSnapshot(DuckLakeSnapshot snapshot,
 	                        const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
-	                        const string &base_data_path, const string &separator, bool load_view_column_tags = false);
+	                        const string &base_data_path, const string &separator, bool load_view_column_tags = false,
+	                        bool load_formal_metadata = false);
 	virtual vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot, TableIndex table_id);
 	virtual vector<DuckLakeFileListEntry> GetFilesForTable(DuckLakeTableEntry &table, DuckLakeSnapshot snapshot,
 	                                                       const FilterPushdownInfo *filter_info = nullptr);
@@ -285,7 +286,7 @@ public:
 	//! Emits the INSERT for new tables and their columns. Caller supplies resolved paths (one per
 	//! table, same order). commit_snapshot is currently unused by the body — kept off the signature.
 	static string WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
-	                             const vector<DuckLakePath> &resolved_paths);
+	                             const vector<DuckLakePath> &resolved_paths, bool write_formal_generated = false);
 	static string WriteNewViews(const vector<DuckLakeViewInfo> &new_views);
 	//! Emits the partition-key diff SQL. Caller supplies the existing partition state (fetched
 	//! via GetCatalogForSnapshot) since the diff is computed against it.
@@ -296,12 +297,17 @@ public:
 	static string WriteNewSortKeys(const vector<DuckLakeSortInfo> &existing_sorts,
 	                               const vector<DuckLakeSortInfo> &new_sorts);
 	static string WriteDroppedColumns(const vector<DuckLakeDroppedColumn> &dropped_columns);
-	static string WriteNewColumns(const vector<DuckLakeNewColumn> &new_columns);
+	static string WriteNewColumns(const vector<DuckLakeNewColumn> &new_columns, bool write_formal_generated = false);
 	static string WriteNewTags(const vector<DuckLakeTagInfo> &new_tags);
 	//! End-snapshot tags (object_id + key) without inserting replacements.
 	static string DropTags(const vector<DuckLakeTagInfo> &tags);
 	static string WriteNewColumnTags(const vector<DuckLakeColumnTagInfo> &new_tags);
 	static string WriteNewViewColumnTags(const vector<DuckLakeViewColumnTagInfo> &new_tags);
+	//! Formal UDT registry (F3c) — dual-written with udt:* tags for one release.
+	static string WriteNewTypes(const vector<DuckLakeTypeInfo> &new_types);
+	static string WriteDroppedTypes(const vector<DuckLakeTypeInfo> &dropped_types);
+	//! Formal CHECK constraints (F3d) — dual-written with check_* tags for one release.
+	static string WriteNewConstraints(const vector<DuckLakeConstraintInfo> &new_constraints);
 	virtual string WriteNewDataFiles(DuckLakeSnapshot &commit_snapshot, const vector<DuckLakeFileInfo> &new_files,
 	                                 const vector<DuckLakeTableInfo> &new_tables,
 	                                 vector<DuckLakeSchemaInfo> &new_schemas_result);
@@ -438,6 +444,8 @@ public:
 	virtual void MigrateV13(bool allow_failures = false);
 	//! 1.1-dev4 → 1.1-dev5: backfill NULL branch_id to 0 (SQLite/Postgres DEFAULT portability)
 	virtual void MigrateV14(bool allow_failures = false);
+	//! 1.1-dev5 → 1.1-dev6: formal ducklake_type / ducklake_table_constraint / generated columns
+	virtual void MigrateV15(bool allow_failures = false);
 	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
 	                              const string &to_version);
 
