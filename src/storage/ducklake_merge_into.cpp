@@ -26,7 +26,8 @@ namespace duckdb {
 class DuckLakeMergeInsert : public PhysicalOperator {
 public:
 	DuckLakeMergeInsert(PhysicalPlan &physical_plan, const vector<LogicalType> &types, PhysicalOperator &catalog_insert,
-	                    optional_ptr<DuckLakeInlineData> inline_data_op, PhysicalOperator &physical_copy);
+	                    optional_ptr<DuckLakeInlineData> inline_data_op, PhysicalOperator &physical_copy,
+	                    vector<unique_ptr<Expression>> checks_p, vector<string> check_names_p);
 
 	//! The copy operator that writes to the file
 	PhysicalOperator &physical_copy;
@@ -36,6 +37,10 @@ public:
 	optional_ptr<DuckLakeInlineData> inline_data_op;
 	//! Extra Projections
 	vector<unique_ptr<Expression>> extra_projections;
+	//! Bound CHECK expressions (when ducklake_enforce_checks is enabled)
+	vector<unique_ptr<Expression>> checks;
+	vector<string> check_names;
+	optional_ptr<DuckLakeTableEntry> table;
 
 public:
 	// Source interface
@@ -67,9 +72,11 @@ public:
 DuckLakeMergeInsert::DuckLakeMergeInsert(PhysicalPlan &physical_plan, const vector<LogicalType> &types,
                                          PhysicalOperator &catalog_insert,
                                          optional_ptr<DuckLakeInlineData> inline_data_op,
-                                         PhysicalOperator &physical_copy)
+                                         PhysicalOperator &physical_copy, vector<unique_ptr<Expression>> checks_p,
+                                         vector<string> check_names_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 1), physical_copy(physical_copy),
-      catalog_insert(catalog_insert), inline_data_op(inline_data_op) {
+      catalog_insert(catalog_insert), inline_data_op(inline_data_op), checks(std::move(checks_p)),
+      check_names(std::move(check_names_p)) {
 }
 
 SourceResultType DuckLakeMergeInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -180,6 +187,9 @@ SinkResultType DuckLakeMergeInsert::Sink(ExecutionContext &context, DataChunk &c
 	auto &gstate = input.global_state.Cast<DuckLakeMergeSinkGlobalState>();
 	auto &lstate = input.local_state.Cast<DuckLakeMergeSinkLocalState>();
 
+	if (!checks.empty() && table) {
+		DuckLakeInsert::VerifyCheckConstraints(context.client, *table, checks, check_names, chunk);
+	}
 	SinkInlineOrCopy(context, chunk, inline_data_op, physical_copy, gstate, lstate, input.interrupt_state);
 	return SinkResultType::NEED_MORE_INPUT;
 }
@@ -340,9 +350,11 @@ class DuckLakeMergeUpdate : public PhysicalOperator {
 public:
 	DuckLakeMergeUpdate(PhysicalPlan &physical_plan, const vector<LogicalType> &types, DuckLakeUpdate &update_op,
 	                    optional_ptr<DuckLakeInlineData> inline_data_op, PhysicalOperator &physical_copy,
-	                    PhysicalOperator &catalog_insert)
+	                    PhysicalOperator &catalog_insert, vector<unique_ptr<Expression>> checks_p,
+	                    vector<string> check_names_p)
 	    : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, types, 1), update_op(update_op),
-	      inline_data_op(inline_data_op), physical_copy(physical_copy), catalog_insert(catalog_insert) {
+	      inline_data_op(inline_data_op), physical_copy(physical_copy), catalog_insert(catalog_insert),
+	      checks(std::move(checks_p)), check_names(std::move(check_names_p)) {
 	}
 
 	DuckLakeUpdate &update_op;
@@ -351,6 +363,9 @@ public:
 	PhysicalOperator &catalog_insert;
 	//! Extra projections for partition columns
 	vector<unique_ptr<Expression>> extra_projections;
+	//! Bound CHECK expressions (when ducklake_enforce_checks is enabled)
+	vector<unique_ptr<Expression>> checks;
+	vector<string> check_names;
 
 public:
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -431,6 +446,10 @@ SinkResultType DuckLakeMergeUpdate::Sink(ExecutionContext &context, DataChunk &c
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
+	if (!checks.empty()) {
+		DuckLakeInsert::VerifyCheckConstraints(context.client, update_op.table, checks, check_names,
+		                                       lstate.update_output);
+	}
 	SinkInlineOrCopy(context, lstate.update_output, inline_data_op, physical_copy, gstate, lstate,
 	                 input.interrupt_state);
 	return SinkResultType::NEED_MORE_INPUT;
@@ -525,9 +544,14 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
 		}
 		catalog_insert.children.push_back(physical_copy);
 
+		vector<string> check_names;
+		auto checks = DuckLakeInsert::BindCheckConstraints(context, ducklake_table, check_names);
+
 		// wrap in DuckLakeMergeUpdate
 		auto &merge_update =
-		    planner.Make<DuckLakeMergeUpdate>(return_types, update_op, inline_data_op, physical_copy, catalog_insert)
+		    planner
+		        .Make<DuckLakeMergeUpdate>(return_types, update_op, inline_data_op, physical_copy, catalog_insert,
+		                                   std::move(checks), std::move(check_names))
 		        .Cast<DuckLakeMergeUpdate>();
 		merge_update.extra_projections = std::move(copy_options.projection_list);
 		result->op = merge_update;
@@ -599,10 +623,16 @@ static unique_ptr<MergeIntoOperator> DuckLakePlanMergeIntoAction(DuckLakeCatalog
 		}
 		catalog_insert.children.push_back(physical_copy);
 
+		vector<string> check_names;
+		auto checks = DuckLakeInsert::BindCheckConstraints(context, ducklake_table, check_names);
+
 		auto &merge_insert =
-		    planner.Make<DuckLakeMergeInsert>(return_types, catalog_insert, inline_data_op, physical_copy)
+		    planner
+		        .Make<DuckLakeMergeInsert>(return_types, catalog_insert, inline_data_op, physical_copy,
+		                                   std::move(checks), std::move(check_names))
 		        .Cast<DuckLakeMergeInsert>();
 		merge_insert.extra_projections = std::move(copy_options.projection_list);
+		merge_insert.table = ducklake_table;
 		result->op = merge_insert;
 		break;
 	}

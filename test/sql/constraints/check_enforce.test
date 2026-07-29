@@ -1,0 +1,106 @@
+# name: test/sql/constraints/check_enforce.test
+# description: Optional CHECK enforcement via ducklake_enforce_checks
+# group: [constraints]
+
+require ducklake
+
+require parquet
+
+# Use BASE_TEST_NAME (stable) — {UUID} is regenerated on every path expansion and breaks detach/reattach
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_check_enforce_files')
+
+statement ok
+CREATE TABLE ducklake.test(i INTEGER, j INTEGER, CHECK (i > j));
+
+# Default: CHECK is not enforced
+statement ok
+INSERT INTO ducklake.test VALUES (1, 2);
+
+query II
+SELECT * FROM ducklake.test ORDER BY i, j
+----
+1	2
+
+# Enable enforcement
+statement ok
+SET ducklake_enforce_checks=true;
+
+# Violating insert fails
+statement error
+INSERT INTO ducklake.test VALUES (1, 5);
+----
+CHECK constraint failed
+
+# Valid insert succeeds
+statement ok
+INSERT INTO ducklake.test VALUES (5, 1);
+
+query II
+SELECT * FROM ducklake.test ORDER BY i, j
+----
+1	2
+5	1
+
+# UPDATE path: violating update fails
+statement error
+UPDATE ducklake.test SET i = 0 WHERE i = 5;
+----
+CHECK constraint failed
+
+# Valid update succeeds
+statement ok
+UPDATE ducklake.test SET i = 10 WHERE i = 5;
+
+query II
+SELECT * FROM ducklake.test ORDER BY i, j
+----
+1	2
+10	1
+
+# Disable enforcement again
+statement ok
+SET ducklake_enforce_checks=false;
+
+statement ok
+INSERT INTO ducklake.test VALUES (0, 100);
+
+# Detach / reattach preserves CHECK metadata
+statement ok
+USE memory
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_check_enforce_files')
+
+statement ok
+SET ducklake_enforce_checks=true;
+
+statement error
+INSERT INTO ducklake.test VALUES (-1, 0);
+----
+CHECK constraint failed
+
+statement ok
+INSERT INTO ducklake.test VALUES (3, 0);
+
+query II
+SELECT * FROM ducklake.test ORDER BY i, j
+----
+0	100
+1	2
+3	0
+10	1
+
+# PK still rejected at DDL
+statement error
+CREATE TABLE ducklake.pk_test(i INTEGER PRIMARY KEY, j INTEGER);
+----
+not supported

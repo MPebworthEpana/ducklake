@@ -306,6 +306,7 @@ PhysicalOperator &DuckLakeCatalog::PlanUpdate(ClientContext &context, PhysicalPl
 	// Recompute generated columns from expressions after applying SET clauses
 	optional_ptr<PhysicalOperator> plan =
 	    &DuckLakeInsert::PlanGeneratedColumnProjection(context, planner, table, update_op);
+	plan = DuckLakeInsert::PlanCheckConstraintVerification(context, planner, table, *plan);
 	optional_ptr<DuckLakeInlineData> inline_data;
 
 	idx_t data_inlining_row_limit = GetInliningLimit(context, table);

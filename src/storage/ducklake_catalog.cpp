@@ -392,27 +392,34 @@ void DuckLakeCatalog::PinSchemaForQuery(DuckLakeTransaction &transaction, shared
 	pin_state->Pin(std::move(entry));
 }
 
+static void LoadColumnDefaults(DuckLakeColumnInfo &col, DuckLakeColumnData &col_data, const LogicalType &col_type) {
+	// Nested types cannot DefaultCastAs from an untyped NULL Value; use a typed NULL instead.
+	if (col.initial_default.IsNull()) {
+		col_data.initial_default = Value(col_type);
+	} else {
+		col_data.initial_default = col.initial_default.DefaultCastAs(col_type);
+	}
+	if (col.default_value.IsNull()) {
+		col_data.default_value = make_uniq<ConstantExpression>(Value());
+	} else if (col.default_value_type == "literal") {
+		col_data.default_value = make_uniq<ConstantExpression>(col.default_value);
+	} else if (col.default_value_type == "expression") {
+		auto sql_expr = Parser::ParseExpressionList(col.default_value.GetValue<string>());
+		if (sql_expr.size() != 1) {
+			throw InternalException("Expected a single expression");
+		}
+		col_data.default_value = std::move(sql_expr[0]);
+	} else {
+		throw NotImplementedException("Column type %s is not supported", col.default_value_type);
+	}
+}
+
 static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) {
 	DuckLakeColumnData col_data;
 	col_data.id = col.id;
 	if (col.children.empty()) {
 		auto col_type = DuckLakeTypes::FromString(col.type);
-		col_data.initial_default = col.initial_default.DefaultCastAs(col_type);
-		if (col.default_value.IsNull()) {
-			col_data.default_value = make_uniq<ConstantExpression>(Value());
-		} else {
-			if (col.default_value_type == "literal") {
-				col_data.default_value = make_uniq<ConstantExpression>(col.default_value);
-			} else if (col.default_value_type == "expression") {
-				auto sql_expr = Parser::ParseExpressionList(col.default_value.GetValue<string>());
-				if (sql_expr.size() != 1) {
-					throw InternalException("Expected a single expression");
-				}
-				col_data.default_value = std::move(sql_expr[0]);
-			} else {
-				throw NotImplementedException("Column type %s is not supported", col.default_value_type);
-			}
-		}
+		LoadColumnDefaults(col, col_data, col_type);
 		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(col_type));
 	}
 	if (StringUtil::CIEquals(col.type, "struct")) {
@@ -423,7 +430,9 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 			child_types.emplace_back(make_pair(std::move(child_col.name), child_id->Type()));
 			child_fields.push_back(std::move(child_id));
 		}
-		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, LogicalType::STRUCT(std::move(child_types)),
+		auto result_type = LogicalType::STRUCT(std::move(child_types));
+		LoadColumnDefaults(col, col_data, result_type);
+		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(result_type),
 		                                  std::move(child_fields));
 	}
 	if (StringUtil::CIEquals(col.type, "list")) {
@@ -434,7 +443,9 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 		auto child_type = child_id->Type();
 		vector<unique_ptr<DuckLakeFieldId>> child_fields;
 		child_fields.push_back(std::move(child_id));
-		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, LogicalType::LIST(child_type),
+		auto result_type = LogicalType::LIST(child_type);
+		LoadColumnDefaults(col, col_data, result_type);
+		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(result_type),
 		                                  std::move(child_fields));
 	}
 	if (DuckLakeTypes::IsArrayType(col.type)) {
@@ -446,8 +457,10 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 		auto child_type = child_id->Type();
 		vector<unique_ptr<DuckLakeFieldId>> child_fields;
 		child_fields.push_back(std::move(child_id));
-		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name,
-		                                  LogicalType::ARRAY(child_type, array_size), std::move(child_fields));
+		auto result_type = LogicalType::ARRAY(child_type, array_size);
+		LoadColumnDefaults(col, col_data, result_type);
+		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(result_type),
+		                                  std::move(child_fields));
 	}
 	if (StringUtil::CIEquals(col.type, "map")) {
 		if (col.children.size() != 2) {
@@ -460,8 +473,9 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 		vector<unique_ptr<DuckLakeFieldId>> child_fields;
 		child_fields.push_back(std::move(key_id));
 		child_fields.push_back(std::move(value_id));
-		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name,
-		                                  LogicalType::MAP(std::move(key_type), std::move(value_type)),
+		auto result_type = LogicalType::MAP(std::move(key_type), std::move(value_type));
+		LoadColumnDefaults(col, col_data, result_type);
+		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(result_type),
 		                                  std::move(child_fields));
 	}
 	throw InvalidInputException("Unrecognized nested type \"%s\"", col.type);

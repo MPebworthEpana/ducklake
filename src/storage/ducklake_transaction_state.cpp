@@ -1274,13 +1274,29 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 
 			auto committed_table_id = commit_state.GetTableId(table);
 
+			// ADD COLUMN ... DEFAULT emits ADD_COLUMN then SET_DEFAULT. The ADD entry holds the nested
+			// child tree; replacing it must rewrite children. SET DEFAULT on a committed column only
+			// rewrites the root row (children already exist in the catalog).
+			bool replacing_txn_add =
+			    txn_added_fields.find(local_change.field_index.index) != txn_added_fields.end();
+
 			// Cancel the previous txn-local add for this field, or drop the committed column.
 			CancelOrDropField(committed_table_id, local_change.field_index, result, txn_added_fields);
 
 			// Insert the new column with the updated info and register it.
 			DuckLakeNewColumn new_col;
 			new_col.table_id = committed_table_id;
-			new_col.column_info = table.GetColumnInfo(local_change.field_index);
+			if (replacing_txn_add) {
+				auto field_ptr = table.GetFieldId(local_change.field_index);
+				if (!field_ptr) {
+					throw InternalException("Field id not found while replacing txn-local column");
+				}
+				new_col.column_info =
+				    DuckLakeTableEntry::ConvertColumn(field_ptr->Name(), field_ptr->Type(), *field_ptr);
+				new_col.column_info.nulls_allowed = table.GetNotNullFields().count(field_ptr->Name()) == 0;
+			} else {
+				new_col.column_info = table.GetColumnInfo(local_change.field_index);
+			}
 			txn_added_fields[local_change.field_index.index] = result.new_columns.size();
 			result.new_columns.push_back(std::move(new_col));
 

@@ -1,0 +1,138 @@
+# name: test/sql/default/nested_defaults.test
+# description: Test nested STRUCT/LIST/MAP/ARRAY column defaults in DuckLake
+# group: [default]
+
+require ducklake
+
+require parquet
+
+# Use BASE_TEST_NAME (stable) — {UUID} is regenerated on every path expansion and breaks detach/reattach
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/nested_defaults', METADATA_CATALOG 'xx')
+
+# ---------------------------------------------------------------------------
+# Foldable nested constant defaults (CREATE + INSERT omit-col)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ducklake.nested_const (
+	id INTEGER,
+	s STRUCT(a INTEGER) DEFAULT {'a': 7},
+	l INTEGER[] DEFAULT [1, 2],
+	m MAP(VARCHAR, INTEGER) DEFAULT MAP {'x': 1},
+	a INTEGER[2] DEFAULT [10, 20]
+);
+
+statement ok
+INSERT INTO ducklake.nested_const (id) VALUES (1);
+
+query IIIII
+SELECT id, s, l, m, a FROM ducklake.nested_const
+----
+1	{'a': 7}	[1, 2]	{x=1}	[10, 20]
+
+# ---------------------------------------------------------------------------
+# Expression nested default + ADD COLUMN + new inserts
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ducklake.nested_expr (id INTEGER);
+
+statement ok
+INSERT INTO ducklake.nested_expr VALUES (1);
+
+statement ok
+CALL ducklake_flush_inlined_data('ducklake')
+
+statement ok
+ALTER TABLE ducklake.nested_expr ADD COLUMN l DOUBLE[] DEFAULT list_value(random())
+
+# Existing and new rows are readable; new inserts evaluate the expression default.
+statement ok
+INSERT INTO ducklake.nested_expr (id) VALUES (2);
+
+query II
+SELECT id, l IS NOT NULL AND len(l) = 1 AND l[1] >= 0 AND l[1] < 1 FROM ducklake.nested_expr ORDER BY id
+----
+1	true
+2	true
+
+# ---------------------------------------------------------------------------
+# ALTER SET DEFAULT + DETACH/ATTACH round-trip
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ducklake.nested_alter (
+	id INTEGER,
+	s STRUCT(a INTEGER)
+);
+
+statement ok
+INSERT INTO ducklake.nested_alter (id, s) VALUES (1, {'a': 0});
+
+statement ok
+ALTER TABLE ducklake.nested_alter ALTER s SET DEFAULT {'a': 99}
+
+statement ok
+INSERT INTO ducklake.nested_alter (id) VALUES (2);
+
+query II
+SELECT id, s FROM ducklake.nested_alter ORDER BY id
+----
+1	{'a': 0}
+2	{'a': 99}
+
+statement ok
+DETACH ducklake
+
+statement ok
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/nested_defaults', METADATA_CATALOG 'xx')
+
+query II
+SELECT id, s FROM ducklake.nested_alter ORDER BY id
+----
+1	{'a': 0}
+2	{'a': 99}
+
+statement ok
+INSERT INTO ducklake.nested_alter (id) VALUES (3);
+
+query II
+SELECT id, s FROM ducklake.nested_alter ORDER BY id
+----
+1	{'a': 0}
+2	{'a': 99}
+3	{'a': 99}
+
+# Constant nested defaults also survive reload
+query IIIII
+SELECT id, s, l, m, a FROM ducklake.nested_const
+----
+1	{'a': 7}	[1, 2]	{x=1}	[10, 20]
+
+statement ok
+INSERT INTO ducklake.nested_const (id) VALUES (2);
+
+query IIIII
+SELECT id, s, l, m, a FROM ducklake.nested_const ORDER BY id
+----
+1	{'a': 7}	[1, 2]	{x=1}	[10, 20]
+2	{'a': 7}	[1, 2]	{x=1}	[10, 20]
+
+# ---------------------------------------------------------------------------
+# Reject column-ref nested defaults (ConstantBinder / DuckLake)
+# ---------------------------------------------------------------------------
+
+statement error
+CREATE TABLE ducklake.nested_bad (id INTEGER, l INTEGER[] DEFAULT [id])
+----
+cannot contain column names
+
+statement error
+ALTER TABLE ducklake.nested_alter ALTER s SET DEFAULT {'a': id}
+----
+Column references are not supported in default expressions
