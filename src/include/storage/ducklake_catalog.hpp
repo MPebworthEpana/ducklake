@@ -249,6 +249,10 @@ public:
 	bool SupportsRefLog() const {
 		return ducklake_version >= DuckLakeVersion::V1_1_DEV_4;
 	}
+	//! Whether formal type / constraint / generated-column metadata tables exist (added in 1.1-dev6)
+	bool SupportsFormalMetadata() const {
+		return ducklake_version >= DuckLakeVersion::V1_1_DEV_6;
+	}
 
 	//! Per-connection writable branch session (`ducklake_use_branch`). Survives auto-commit.
 	void SetSessionBranch(ClientContext &context, idx_t branch_id, const string &branch_name, idx_t head_snapshot_id);

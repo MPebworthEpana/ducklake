@@ -376,7 +376,7 @@ Once U1–U3 land, update the Python migrator from the docs so it:
 **U0–U5 are implemented on this branch.** Remaining adjuncts (nested
 expression defaults, optional CHECK enforcement, catalog matrix / formal
 spec tables) are planned in
-[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md). Never enforce
+[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md) and type encodings in [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md). Never enforce
 PK/FK in DuckLake. Virtual generated columns and the Python migrator remain
 separate follow-ups.
 

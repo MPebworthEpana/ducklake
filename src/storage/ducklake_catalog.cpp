@@ -546,32 +546,72 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		schema_info.schema = Identifier(schema.name);
 		auto schema_entry = make_uniq<DuckLakeSchemaEntry>(*this, schema_info, schema.id, std::move(schema.uuid),
 		                                                   std::move(schema.path));
-		// Reload user-defined types persisted as schema tags (key = udt:<name>)
-		auto context_ref = transaction.context.lock();
-		if (context_ref) {
+		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
+	}
+
+	auto schema_set = make_uniq<DuckLakeCatalogSet>(std::move(schema_map));
+	auto &schema_id_map = schema_set->GetSchemaIdMap();
+
+	// Prefer formal ducklake_type rows (F3c); fall back to udt:* schema tags.
+	auto context_ref = transaction.context.lock();
+	case_insensitive_map_t<case_insensitive_set_t> loaded_types_by_schema;
+	if (context_ref) {
+		for (auto &type_info : catalog.types) {
+			auto entry = schema_id_map.find(type_info.schema_id);
+			if (entry == schema_id_map.end()) {
+				continue;
+			}
+			auto &schema_entry = entry->second.get();
+			try {
+				auto logical_type = TransformStringToLogicalType(type_info.physical_type, *context_ref);
+				if (logical_type.id() == LogicalTypeId::ENUM) {
+					logical_type.SetAlias(type_info.type_name);
+				}
+				CreateTypeInfo create_type_info(type_info.type_name, logical_type);
+				auto type_entry = make_uniq<TypeCatalogEntry>(*this, schema_entry, create_type_info);
+				schema_entry.AddEntry(CatalogType::TYPE_ENTRY, std::move(type_entry));
+				loaded_types_by_schema[schema_entry.name.GetIdentifierName()].insert(type_info.type_name);
+			} catch (...) {
+				// Skip unparseable formal types
+			}
+		}
+		for (auto &schema : catalog.schemas) {
+			auto schema_entry_it = schema_id_map.find(schema.id);
+			if (schema_entry_it == schema_id_map.end()) {
+				continue;
+			}
+			auto &schema_entry = schema_entry_it->second.get();
+			auto &loaded = loaded_types_by_schema[schema_entry.name.GetIdentifierName()];
 			for (auto &tag : schema.tags) {
 				if (!StringUtil::StartsWith(tag.key, "udt:") || tag.key.size() <= 4) {
 					continue;
 				}
 				string type_name = tag.key.substr(4);
+				if (loaded.count(type_name)) {
+					continue;
+				}
 				try {
 					auto logical_type = TransformStringToLogicalType(tag.value, *context_ref);
 					if (logical_type.id() == LogicalTypeId::ENUM) {
 						logical_type.SetAlias(type_name);
 					}
 					CreateTypeInfo type_info(type_name, logical_type);
-					auto type_entry = make_uniq<TypeCatalogEntry>(*this, *schema_entry, type_info);
-					schema_entry->AddEntry(CatalogType::TYPE_ENTRY, std::move(type_entry));
+					auto type_entry = make_uniq<TypeCatalogEntry>(*this, schema_entry, type_info);
+					schema_entry.AddEntry(CatalogType::TYPE_ENTRY, std::move(type_entry));
+					loaded.insert(type_name);
 				} catch (...) {
 					// Skip unparseable UDT tags (e.g. from other dialects)
 				}
 			}
 		}
-		schema_map.insert(make_pair(std::move(schema.name), std::move(schema_entry)));
 	}
 
-	auto schema_set = make_uniq<DuckLakeCatalogSet>(std::move(schema_map));
-	auto &schema_id_map = schema_set->GetSchemaIdMap();
+	// Index formal constraints by table for dual-read (F3d).
+	unordered_map<idx_t, vector<reference<DuckLakeConstraintInfo>>> constraints_by_table;
+	for (auto &constraint : catalog.constraints) {
+		constraints_by_table[constraint.table_id.index].push_back(constraint);
+	}
+
 	// load the table entries
 	for (auto &table : catalog.tables) {
 		// find the schema for the table
@@ -607,6 +647,10 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 					column_tags[tag.key] = tag.value;
 				}
 			}
+			// Prefer formal generated_* fields; fall back to generated tags (F3e).
+			if (col_info.is_generated && !col_info.generated_expression.empty()) {
+				column_tags["generated"] = col_info.generated_expression;
+			}
 			if (!column_tags.empty()) {
 				column.SetTags(std::move(column_tags));
 			}
@@ -622,18 +666,44 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 			auto &col = create_table_info->columns.GetColumn(Identifier(not_null_col));
 			create_table_info->constraints.push_back(make_uniq<NotNullConstraint>(col.Logical()));
 		}
-		// Reconstruct unenforced CHECK constraints from table tags
-		for (auto &tag : table.tags) {
-			if (!StringUtil::StartsWith(tag.key, "check_") || StringUtil::StartsWith(tag.key, "check_dialect_")) {
-				continue;
-			}
-			try {
-				auto exprs = Parser::ParseExpressionList(tag.value);
-				if (exprs.size() == 1) {
-					create_table_info->constraints.push_back(make_uniq<CheckConstraint>(std::move(exprs[0])));
+		// Prefer formal ducklake_table_constraint rows; fall back to check_* tags (don't duplicate).
+		bool loaded_formal_checks = false;
+		auto constraint_it = constraints_by_table.find(table.id.index);
+		if (constraint_it != constraints_by_table.end()) {
+			for (auto &constraint_ref : constraint_it->second) {
+				auto &constraint = constraint_ref.get();
+				if (!StringUtil::CIEquals(constraint.constraint_type, "check")) {
+					continue;
 				}
-			} catch (...) {
-				// Ignore unparseable CHECK tags from other dialects
+				try {
+					auto exprs = Parser::ParseExpressionList(constraint.expression);
+					if (exprs.size() == 1) {
+						create_table_info->constraints.push_back(make_uniq<CheckConstraint>(std::move(exprs[0])));
+						// Keep check_* tags populated so BindCheckConstraints / enforcement keep working.
+						string idx = to_string(constraint.constraint_id);
+						create_table_info->tags["check_" + idx] = constraint.expression;
+						create_table_info->tags["check_dialect_" + idx] =
+						    constraint.dialect.empty() ? "duckdb" : constraint.dialect;
+						loaded_formal_checks = true;
+					}
+				} catch (...) {
+					// Ignore unparseable formal constraints
+				}
+			}
+		}
+		if (!loaded_formal_checks) {
+			for (auto &tag : table.tags) {
+				if (!StringUtil::StartsWith(tag.key, "check_") || StringUtil::StartsWith(tag.key, "check_dialect_")) {
+					continue;
+				}
+				try {
+					auto exprs = Parser::ParseExpressionList(tag.value);
+					if (exprs.size() == 1) {
+						create_table_info->constraints.push_back(make_uniq<CheckConstraint>(std::move(exprs[0])));
+					}
+				} catch (...) {
+					// Ignore unparseable CHECK tags from other dialects
+				}
 			}
 		}
 		// create the table and add it to the schema set

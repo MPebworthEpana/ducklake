@@ -16,6 +16,7 @@ bool SQLiteMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::ENUM:
 	// SQLite converts IEEE 754 NaN to NULL when storing double values,
 	// so FLOAT/DOUBLE must be stored as VARCHAR to preserve NaN through the round-trip
 	case LogicalTypeId::FLOAT:
@@ -42,6 +43,7 @@ string SQLiteMetadataManager::GetColumnTypeInternal(const LogicalType &column_ty
 	case LogicalTypeId::FLOAT:
 	case LogicalTypeId::DOUBLE:
 	case LogicalTypeId::VARIANT:
+	case LogicalTypeId::ENUM:
 		return "VARCHAR";
 	default:
 		return column_type.ToString();

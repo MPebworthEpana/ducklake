@@ -425,3 +425,20 @@ spec version bump). Land **F3a** immediately after so nested defaults and
 CHECK enforcement are proven on every catalog backend. Formal tables
 (**F3c–F3e**) should ride a metadata version bump with dual-read of tags
 and a clear sunset note — do not block F1/F2 on that work.
+
+---
+
+## Implementation status (this branch)
+
+| ID | Status | Notes |
+|---|---|---|
+| **F1** | Done | Nested STRUCT/LIST/MAP/ARRAY defaults accept, persist, reload; see `test/sql/default/nested_defaults.test` |
+| **F2** | Done | `ducklake_enforce_checks` (default false); INSERT/UPDATE/MERGE verification |
+| **F3a** | Done | array/enum/generated tests use `{DUCKLAKE_CONNECTION}`; ENUM non-native on PG/SQLite |
+| **F3b** | Done | [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md) documents `array(N)` / `enum('…')` |
+| **F3c** | Done | `ducklake_type` + members; dual-write `udt:*`; MigrateV15; version `1.1-dev6` |
+| **F3d** | Done | `ducklake_table_constraint`; dual-write `check_*` |
+| **F3e** | Done | `ducklake_column.is_generated` / `generated_expression` / `generated_dialect` |
+
+Tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready `array` / `enum` / `generated_columns`.
+

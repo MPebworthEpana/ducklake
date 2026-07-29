@@ -6,8 +6,13 @@ require ducklake
 
 require parquet
 
+# Use BASE_TEST_NAME (stable) — {UUID} is regenerated on every path expansion and breaks detach/reattach
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_enum_files')
 
 statement ok
 CREATE TABLE ducklake.test AS SELECT 'hello'::ENUM('world', 'hello') AS h;
@@ -46,7 +51,7 @@ statement ok
 DETACH ducklake
 
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_enum_files')
 
 query I
 SELECT * FROM ducklake.test ORDER BY h
@@ -85,7 +90,7 @@ statement ok
 DETACH ducklake
 
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_enum_files')
 
 query II
 SELECT p.x, p.y FROM ducklake.pts;
@@ -105,7 +110,7 @@ statement ok
 DETACH ducklake
 
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_enum.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_enum_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_enum_files')
 
 statement error
 SELECT 'happy'::ducklake.mood;

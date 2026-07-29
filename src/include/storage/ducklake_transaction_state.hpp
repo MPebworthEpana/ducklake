@@ -109,6 +109,8 @@ struct DuckLakeCommitContext {
 	bool supports_v1_1_metadata = false;
 	//! Whether writable divergent branches are available (>= 1.1-dev3).
 	bool supports_writable_branches = false;
+	//! Whether formal type/constraint/generated metadata is available (>= 1.1-dev6).
+	bool supports_formal_metadata = false;
 	//! Whether inlined data uses one physical table per table/schema_version across branches.
 	bool shared_inlining_layout = true;
 	//! Active branch for this commit (0 = main).
@@ -229,6 +231,9 @@ public:
 	//! User-defined types persisted as ducklake_tag on the schema object_id (key=udt:<name>).
 	vector<DuckLakeTagInfo> new_udt_tags;
 	vector<DuckLakeTagInfo> dropped_udt_tags; // id=schema_id, key=udt:name (value unused)
+	//! Formal UDT rows dual-written alongside udt:* tags when catalog >= 1.1-dev6.
+	vector<DuckLakeTypeInfo> new_types;
+	vector<DuckLakeTypeInfo> dropped_types; // schema_id + type_name identify the row
 	LocalTableChanges local_changes;
 	vector<FlushedInlinedTableInfo> flushed_inlined_tables;
 };

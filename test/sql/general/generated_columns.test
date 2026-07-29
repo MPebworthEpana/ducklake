@@ -6,8 +6,13 @@ require ducklake
 
 require parquet
 
+# Use BASE_TEST_NAME (stable) — {UUID} is regenerated on every path expansion and breaks detach/reattach
+test-env DUCKLAKE_CONNECTION {TEST_DIR}/{BASE_TEST_NAME}.db
+
+test-env DATA_PATH {TEST_DIR}
+
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_generated.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_generated_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_generated_files')
 
 # Constant generated columns are materialized as defaults
 statement ok
@@ -39,7 +44,7 @@ statement ok
 DETACH ducklake
 
 statement ok
-ATTACH 'ducklake:{TEST_DIR}/ducklake_generated.db' AS ducklake (DATA_PATH '{TEST_DIR}/ducklake_generated_files')
+ATTACH 'ducklake:{DUCKLAKE_CONNECTION}' AS ducklake (DATA_PATH '{DATA_PATH}/ducklake_generated_files')
 
 query II
 SELECT * FROM ducklake.t1 ORDER BY c1

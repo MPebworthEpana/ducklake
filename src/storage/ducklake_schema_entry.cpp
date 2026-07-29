@@ -351,7 +351,7 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction tr
 	auto type_for_sql = info.type;
 	type_for_sql.SetAlias("");
 	auto &duck_transaction = DuckLakeTransaction::Get(transaction.GetContext(), catalog);
-	duck_transaction.RegisterUserType(schema_id, info.name.GetIdentifierName(), type_for_sql.ToString());
+	duck_transaction.RegisterUserType(schema_id, info.name.GetIdentifierName(), type_for_sql);
 	return result;
 }
 

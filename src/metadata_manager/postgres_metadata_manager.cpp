@@ -18,6 +18,7 @@ bool PostgresMetadataManager::TypeIsNativelySupported(const LogicalType &type) {
 	case LogicalTypeId::MAP:
 	case LogicalTypeId::LIST:
 	case LogicalTypeId::ARRAY:
+	case LogicalTypeId::ENUM:
 	case LogicalTypeId::UBIGINT:
 	case LogicalTypeId::HUGEINT:
 	case LogicalTypeId::UHUGEINT:
@@ -75,6 +76,7 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	case LogicalTypeId::TIMESTAMP_SEC:
 	case LogicalTypeId::TIMESTAMP_MS:
 	case LogicalTypeId::TIMESTAMP_NS:
+	case LogicalTypeId::ENUM:
 		return "VARCHAR";
 	default:
 		return column_type.ToString();

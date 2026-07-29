@@ -23,6 +23,7 @@
 #include "storage/ducklake_partition_data.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
@@ -587,6 +588,207 @@ UPDATE {METADATA_CATALOG}.ducklake_schema_versions SET branch_id = 0 WHERE branc
 UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev5' WHERE key = 'version';
 	)";
 	ExecuteMigration(migrate_query, allow_failures, "1.1-dev4", "1.1-dev5");
+}
+
+void DuckLakeMetadataManager::MigrateV15(bool allow_failures) {
+	// F3c/F3d/F3e: formal type registry, table constraints, generated-column columns.
+	string migrate_query = R"(
+CREATE TABLE {IF_NOT_EXISTS} {METADATA_CATALOG}.ducklake_type(
+	type_id BIGINT,
+	type_uuid UUID,
+	begin_snapshot BIGINT,
+	end_snapshot BIGINT,
+	schema_id BIGINT,
+	type_name VARCHAR,
+	type_class VARCHAR,
+	physical_type VARCHAR,
+	dialect VARCHAR,
+	branch_id BIGINT DEFAULT 0
+);
+CREATE TABLE {IF_NOT_EXISTS} {METADATA_CATALOG}.ducklake_type_member(
+	type_id BIGINT,
+	member_index INTEGER,
+	member_name VARCHAR,
+	member_type VARCHAR
+);
+CREATE TABLE {IF_NOT_EXISTS} {METADATA_CATALOG}.ducklake_table_constraint(
+	table_id BIGINT,
+	constraint_id BIGINT,
+	begin_snapshot BIGINT,
+	end_snapshot BIGINT,
+	constraint_type VARCHAR,
+	expression VARCHAR,
+	dialect VARCHAR,
+	enforced BOOLEAN,
+	branch_id BIGINT DEFAULT 0
+);
+ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN {IF_NOT_EXISTS} is_generated BOOLEAN DEFAULT FALSE;
+ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN {IF_NOT_EXISTS} generated_expression VARCHAR;
+ALTER TABLE {METADATA_CATALOG}.ducklake_column ADD COLUMN {IF_NOT_EXISTS} generated_dialect VARCHAR;
+UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '1.1-dev6' WHERE key = 'version';
+	)";
+	ExecuteMigration(migrate_query, allow_failures, "1.1-dev5", "1.1-dev6");
+
+	// Migrate live check_* tags → ducklake_table_constraint (idempotent).
+	auto check_migrate = Execute(R"(
+INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint(
+	table_id, constraint_id, begin_snapshot, end_snapshot, constraint_type, expression, dialect, enforced, branch_id)
+SELECT
+	t.object_id,
+	TRY_CAST(substr(t.key, 7) AS BIGINT),
+	t.begin_snapshot,
+	NULL,
+	'check',
+	t.value,
+	COALESCE(d.value, 'duckdb'),
+	false,
+	0
+FROM {METADATA_CATALOG}.ducklake_tag t
+LEFT JOIN {METADATA_CATALOG}.ducklake_tag d
+  ON d.object_id = t.object_id
+ AND d.key = 'check_dialect_' || substr(t.key, 7)
+ AND d.end_snapshot IS NULL
+WHERE t.key LIKE 'check_%'
+  AND t.key NOT LIKE 'check_dialect_%'
+  AND t.end_snapshot IS NULL
+  AND TRY_CAST(substr(t.key, 7) AS BIGINT) IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_table_constraint c
+    WHERE c.table_id = t.object_id
+      AND c.constraint_id = TRY_CAST(substr(t.key, 7) AS BIGINT)
+      AND c.end_snapshot IS NULL
+  );
+)");
+	if (check_migrate->HasError() && !allow_failures) {
+		check_migrate->GetErrorObject().Throw("Failed to migrate check_* tags to ducklake_table_constraint: ");
+	}
+
+	// Migrate live column tag "generated" → ducklake_column generated_* fields.
+	auto gen_migrate = Execute(R"(
+UPDATE {METADATA_CATALOG}.ducklake_column AS c
+SET is_generated = true,
+    generated_expression = ct.value,
+    generated_dialect = 'duckdb'
+FROM {METADATA_CATALOG}.ducklake_column_tag ct
+WHERE c.table_id = ct.table_id
+  AND c.column_id = ct.column_id
+  AND ct.key = 'generated'
+  AND ct.end_snapshot IS NULL
+  AND c.end_snapshot IS NULL
+  AND (c.is_generated IS NULL OR NOT c.is_generated);
+)");
+	if (gen_migrate->HasError() && !allow_failures) {
+		gen_migrate->GetErrorObject().Throw("Failed to migrate generated column tags: ");
+	}
+
+	// Migrate live udt:* tags → ducklake_type (+ members). Done in C++ so we can parse ENUM/STRUCT.
+	auto udt_tags = Query(R"(
+SELECT object_id, begin_snapshot, key, value
+FROM {METADATA_CATALOG}.ducklake_tag
+WHERE key LIKE 'udt:%' AND end_snapshot IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM {METADATA_CATALOG}.ducklake_type typ
+    WHERE typ.schema_id = object_id
+      AND typ.type_name = substr(key, 5)
+      AND typ.end_snapshot IS NULL
+  )
+)");
+	if (udt_tags->HasError()) {
+		if (!allow_failures) {
+			udt_tags->GetErrorObject().Throw("Failed to list udt:* tags for migration: ");
+		}
+		return;
+	}
+	auto next_id_result = Query(R"(
+SELECT GREATEST(
+  COALESCE((SELECT MAX(next_catalog_id) FROM {METADATA_CATALOG}.ducklake_snapshot), 0),
+  COALESCE((SELECT MAX(type_id) + 1 FROM {METADATA_CATALOG}.ducklake_type), 0)
+)
+)");
+	idx_t next_type_id = 0;
+	if (!next_id_result->HasError()) {
+		for (auto &row : *next_id_result) {
+			next_type_id = row.GetValue<uint64_t>(0);
+		}
+	}
+	idx_t types_inserted = 0;
+	for (auto &row : *udt_tags) {
+		auto schema_id = row.GetValue<uint64_t>(0);
+		auto begin_snapshot = row.GetValue<uint64_t>(1);
+		auto key = row.GetValue<string>(2);
+		auto physical_type = row.GetValue<string>(3);
+		if (key.size() <= 4) {
+			continue;
+		}
+		string type_name = key.substr(4);
+		string type_class = "enum";
+		vector<DuckLakeTypeMemberInfo> members;
+		try {
+			auto logical_type = DuckLakeTypes::FromString(physical_type);
+			if (logical_type.id() == LogicalTypeId::ENUM) {
+				type_class = "enum";
+				auto &values = EnumType::GetValuesInsertOrder(logical_type);
+				auto data = FlatVector::GetData<string_t>(values);
+				auto size = EnumType::GetSize(logical_type);
+				for (idx_t i = 0; i < size; i++) {
+					DuckLakeTypeMemberInfo member;
+					member.member_index = i;
+					member.member_name = data[i].GetString();
+					members.push_back(std::move(member));
+				}
+			} else if (logical_type.id() == LogicalTypeId::STRUCT) {
+				type_class = "struct_alias";
+				auto &children = StructType::GetChildTypes(logical_type);
+				for (idx_t i = 0; i < children.size(); i++) {
+					DuckLakeTypeMemberInfo member;
+					member.member_index = i;
+					member.member_name = children[i].first.GetIdentifierName();
+					member.member_type = DuckLakeTypes::ToString(children[i].second);
+					members.push_back(std::move(member));
+				}
+			} else {
+				continue;
+			}
+		} catch (...) {
+			continue;
+		}
+		auto type_uuid = UUID::ToString(UUIDv7::GenerateRandomUUID());
+		auto type_id = next_type_id++;
+		auto insert_type = Execute(StringUtil::Format(
+		    R"(INSERT INTO {METADATA_CATALOG}.ducklake_type
+(type_id, type_uuid, begin_snapshot, end_snapshot, schema_id, type_name, type_class, physical_type, dialect, branch_id)
+VALUES (%llu, '%s', %llu, NULL, %llu, %s, %s, %s, 'duckdb', 0);)",
+		    type_id, type_uuid, begin_snapshot, schema_id, SQLString(type_name), SQLString(type_class),
+		    SQLString(physical_type)));
+		if (insert_type->HasError()) {
+			if (!allow_failures) {
+				insert_type->GetErrorObject().Throw("Failed to migrate udt:* tag to ducklake_type: ");
+			}
+			continue;
+		}
+		types_inserted++;
+		for (auto &member : members) {
+			string member_type_sql =
+			    member.member_type.empty() ? "NULL" : SQLString::ToString(member.member_type);
+			auto insert_member = Execute(StringUtil::Format(
+			    R"(INSERT INTO {METADATA_CATALOG}.ducklake_type_member(type_id, member_index, member_name, member_type)
+VALUES (%llu, %llu, %s, %s);)",
+			    type_id, member.member_index, SQLString(member.member_name), member_type_sql));
+			if (insert_member->HasError() && !allow_failures) {
+				insert_member->GetErrorObject().Throw("Failed to migrate udt:* type members: ");
+			}
+		}
+	}
+	if (types_inserted > 0) {
+		auto bump = Execute(StringUtil::Format(
+		    R"(UPDATE {METADATA_CATALOG}.ducklake_snapshot SET next_catalog_id = %llu
+WHERE snapshot_id = (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot)
+  AND next_catalog_id < %llu;)",
+		    next_type_id, next_type_id));
+		if (bump->HasError() && !allow_failures) {
+			bump->GetErrorObject().Throw("Failed to bump next_catalog_id after type migration: ");
+		}
+	}
 }
 
 idx_t DuckLakeMetadataManager::CreateRef(const string &ref_name, const string &ref_type, idx_t snapshot_id,
@@ -4375,12 +4577,13 @@ DuckLakeCatalogInfo DuckLakeMetadataManager::GetCatalogForSnapshot(DuckLakeSnaps
 	auto &ducklake_catalog = transaction.GetCatalog();
 	return BuildCatalogForSnapshot(
 	    snapshot, [this](DuckLakeSnapshot s, string q) { return Query(s, q); }, ducklake_catalog.DataPath(),
-	    ducklake_catalog.Separator(), ducklake_catalog.SupportsViewColumnTags());
+	    ducklake_catalog.Separator(), ducklake_catalog.SupportsViewColumnTags(),
+	    ducklake_catalog.SupportsFormalMetadata());
 }
 
 DuckLakeCatalogInfo DuckLakeMetadataManager::BuildCatalogForSnapshot(
     DuckLakeSnapshot snapshot, const std::function<unique_ptr<QueryResult>(DuckLakeSnapshot, string)> &query_executor,
-    const string &base_data_path, const string &separator, bool load_view_column_tags) {
+    const string &base_data_path, const string &separator, bool load_view_column_tags, bool load_formal_metadata) {
 	DuckLakeCatalogInfo catalog;
 	// load the schema information (including tags used for persisted CREATE TYPE)
 	static const vector<pair<string, string>> SCHEMA_TAG_FIELDS = {
@@ -4442,6 +4645,9 @@ WHERE {VISIBLE_SCHEMA}
 	};
 
 	// load the table information
+	string generated_select = load_formal_metadata ? ", col.is_generated, col.generated_expression, col.generated_dialect"
+	                                               : ", NULL AS is_generated, NULL AS generated_expression, NULL AS "
+	                                                 "generated_dialect";
 	result = query_executor(snapshot,
 	                        StringUtil::Format(R"(
 SELECT schema_id, tbl.table_id, table_uuid::VARCHAR, table_name,
@@ -4467,7 +4673,7 @@ SELECT schema_id, tbl.table_id, table_uuid::VARCHAR, table_name,
 		FROM {METADATA_CATALOG}.ducklake_column_tag col_tag
 		WHERE col_tag.table_id=tbl.table_id AND col_tag.column_id=col.column_id AND
 		      {VISIBLE_COLUMN_TAG}
-	) AS column_tags, default_value_type
+	) AS column_tags, default_value_type%s
 FROM {METADATA_CATALOG}.ducklake_table tbl
 LEFT JOIN {METADATA_CATALOG}.ducklake_column col USING (table_id)
 WHERE {VISIBLE_TABLE}
@@ -4475,7 +4681,7 @@ WHERE {VISIBLE_TABLE}
 ORDER BY table_id, parent_column NULLS FIRST, column_order
 )",
 	                                           ListAggregation(TAG_FIELDS), ListAggregation(INLINED_DATA_TABLES_FIELDS),
-	                                           ListAggregation(TAG_FIELDS)));
+	                                           ListAggregation(TAG_FIELDS), generated_select));
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to get table information from DuckLake: ");
 	}
@@ -4548,6 +4754,16 @@ ORDER BY table_id, parent_column NULLS FIRST, column_order
 		if (!row.IsNull(COLUMN_INDEX_START + 7)) {
 			auto tags = row.GetValue<Value>(COLUMN_INDEX_START + 7);
 			column_info.tags = LoadTags(tags);
+		}
+		// Formal generated-column fields (F3e); indices after default_value_type
+		if (!row.IsNull(COLUMN_INDEX_START + 9)) {
+			column_info.is_generated = row.GetValue<bool>(COLUMN_INDEX_START + 9);
+		}
+		if (!row.IsNull(COLUMN_INDEX_START + 10)) {
+			column_info.generated_expression = row.GetValue<string>(COLUMN_INDEX_START + 10);
+		}
+		if (!row.IsNull(COLUMN_INDEX_START + 11)) {
+			column_info.generated_dialect = row.GetValue<string>(COLUMN_INDEX_START + 11);
 		}
 
 		if (row.IsNull(COLUMN_INDEX_START + 6)) {
@@ -4715,6 +4931,89 @@ ORDER BY sort.table_id, sort.sort_id, sort_expr.sort_key_index
 		sort_field.null_order = (StringUtil::CIEquals(null_order_str, "NULLS_FIRST") ? OrderByNullType::NULLS_FIRST
 		                                                                             : OrderByNullType::NULLS_LAST);
 		sort_entry.fields.push_back(std::move(sort_field));
+	}
+
+	if (load_formal_metadata) {
+		// load formal UDT registry (F3c)
+		static const vector<pair<string, string>> TYPE_MEMBER_FIELDS = {
+		    {"member_index", "member_index"},
+		    {"member_name", "member_name"},
+		    {"member_type", "member_type"},
+		};
+		result = query_executor(snapshot, StringUtil::Format(R"(
+SELECT typ.type_id, typ.type_uuid::VARCHAR, typ.schema_id, typ.type_name, typ.type_class, typ.physical_type,
+       typ.dialect, COALESCE(typ.branch_id, 0),
+	(
+		SELECT %s
+		FROM {METADATA_CATALOG}.ducklake_type_member mem
+		WHERE mem.type_id = typ.type_id
+	) AS members
+FROM {METADATA_CATALOG}.ducklake_type typ
+WHERE {SNAPSHOT_ID} >= typ.begin_snapshot AND ({SNAPSHOT_ID} < typ.end_snapshot OR typ.end_snapshot IS NULL)
+ORDER BY typ.schema_id, typ.type_name
+)",
+		                                                     ListAggregation(TYPE_MEMBER_FIELDS)));
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to get type information from DuckLake: ");
+		}
+		for (auto &row : *result) {
+			DuckLakeTypeInfo type_info;
+			type_info.type_id = row.GetValue<uint64_t>(0);
+			type_info.type_uuid = row.GetValue<string>(1);
+			type_info.schema_id = SchemaIndex(row.GetValue<uint64_t>(2));
+			type_info.type_name = row.GetValue<string>(3);
+			type_info.type_class = row.GetValue<string>(4);
+			type_info.physical_type = row.GetValue<string>(5);
+			if (!row.IsNull(6)) {
+				type_info.dialect = row.GetValue<string>(6);
+			}
+			type_info.branch_id = row.GetValue<uint64_t>(7);
+			if (!row.IsNull(8)) {
+				auto members_val = row.GetValue<Value>(8);
+				if (members_val.type().id() == LogicalTypeId::LIST) {
+					auto &children = ListValue::GetChildren(members_val);
+					for (auto &child : children) {
+						auto &fields = StructValue::GetChildren(child);
+						DuckLakeTypeMemberInfo member;
+						if (!fields[0].IsNull()) {
+							member.member_index = fields[0].GetValue<uint64_t>();
+						}
+						if (!fields[1].IsNull()) {
+							member.member_name = fields[1].GetValue<string>();
+						}
+						if (fields.size() > 2 && !fields[2].IsNull()) {
+							member.member_type = fields[2].GetValue<string>();
+						}
+						type_info.members.push_back(std::move(member));
+					}
+				}
+			}
+			catalog.types.push_back(std::move(type_info));
+		}
+
+		// load formal table constraints (F3d)
+		result = query_executor(snapshot, R"(
+SELECT table_id, constraint_id, constraint_type, expression, dialect, COALESCE(enforced, false), COALESCE(branch_id, 0)
+FROM {METADATA_CATALOG}.ducklake_table_constraint tc
+WHERE {SNAPSHOT_ID} >= tc.begin_snapshot AND ({SNAPSHOT_ID} < tc.end_snapshot OR tc.end_snapshot IS NULL)
+ORDER BY table_id, constraint_id
+)");
+		if (result->HasError()) {
+			result->GetErrorObject().Throw("Failed to get constraint information from DuckLake: ");
+		}
+		for (auto &row : *result) {
+			DuckLakeConstraintInfo constraint;
+			constraint.table_id = TableIndex(row.GetValue<uint64_t>(0));
+			constraint.constraint_id = row.GetValue<uint64_t>(1);
+			constraint.constraint_type = row.GetValue<string>(2);
+			constraint.expression = row.GetValue<string>(3);
+			if (!row.IsNull(4)) {
+				constraint.dialect = row.GetValue<string>(4);
+			}
+			constraint.enforced = row.GetValue<bool>(5);
+			constraint.branch_id = row.GetValue<uint64_t>(6);
+			catalog.constraints.push_back(std::move(constraint));
+		}
 	}
 
 	return catalog;
@@ -6631,7 +6930,7 @@ string GetExpressionType(ParsedExpression &expression) {
 }
 
 static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex table_id, optional_idx parent,
-                                 string &result) {
+                                 string &result, bool write_formal_generated) {
 	if (!result.empty()) {
 		result += ",";
 	}
@@ -6667,12 +6966,25 @@ static void ColumnToSQLRecursive(const DuckLakeColumnInfo &column, TableIndex ta
 	auto column_id = column.id.index;
 	auto column_order = column_id;
 
+	string generated_sql;
+	if (write_formal_generated) {
+		string gen_expr = column.is_generated && !column.generated_expression.empty()
+		                      ? SQLString::ToString(column.generated_expression)
+		                      : "NULL";
+		string gen_dialect =
+		    column.is_generated
+		        ? SQLString::ToString(column.generated_dialect.empty() ? "duckdb" : column.generated_dialect)
+		        : "NULL";
+		generated_sql =
+		    StringUtil::Format(", %s, %s, %s", column.is_generated ? "true" : "false", gen_expr, gen_dialect);
+	}
+
 	result += StringUtil::Format(
-	    "(%d, {SNAPSHOT_ID}, NULL, %d, %d, %s, %s, %s, %s, %s, %s, %s, %s{BRANCH_ID_VAL})", column_id, table_id.index,
+	    "(%d, {SNAPSHOT_ID}, NULL, %d, %d, %s, %s, %s, %s, %s, %s, %s, %s%s{BRANCH_ID_VAL})", column_id, table_id.index,
 	    column_order, SQLString(column.name), SQLString(column.type), initial_default_val, default_val,
-	    column.nulls_allowed ? "true" : "false", parent_idx, default_val_type, default_val_system);
+	    column.nulls_allowed ? "true" : "false", parent_idx, default_val_type, default_val_system, generated_sql);
 	for (auto &child : column.children) {
-		ColumnToSQLRecursive(child, table_id, column_id, result);
+		ColumnToSQLRecursive(child, table_id, column_id, result, write_formal_generated);
 	}
 }
 
@@ -6769,7 +7081,8 @@ string DuckLakeMetadataManager::GetInlinedTableQuery(const DuckLakeTableInfo &ta
 }
 
 string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &new_tables,
-                                               const vector<DuckLakePath> &resolved_paths) {
+                                               const vector<DuckLakePath> &resolved_paths,
+                                               bool write_formal_generated) {
 	if (new_tables.empty()) {
 		return {};
 	}
@@ -6791,7 +7104,7 @@ string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &
 		                                       table.id.index, table.uuid, schema_id, SQLString(table.name),
 		                                       SQLString(path.path), path.path_is_relative ? "true" : "false");
 		for (auto &column : table.columns) {
-			ColumnToSQLRecursive(column, table.id, optional_idx(), column_insert_sql);
+			ColumnToSQLRecursive(column, table.id, optional_idx(), column_insert_sql, write_formal_generated);
 		}
 	}
 	string batch_query;
@@ -6802,11 +7115,13 @@ string DuckLakeMetadataManager::WriteNewTables(const vector<DuckLakeTableInfo> &
 		               table_insert_sql + ";";
 	}
 	if (!column_insert_sql.empty()) {
+		string generated_cols =
+		    write_formal_generated ? ", is_generated, generated_expression, generated_dialect" : "";
 		batch_query +=
 		    "INSERT INTO {METADATA_CATALOG}.ducklake_column(column_id, begin_snapshot, end_snapshot, table_id, "
 		    "column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, "
-		    "default_value_type, default_value_dialect{BRANCH_ID_COL}) VALUES " +
-		    column_insert_sql + ";";
+		    "default_value_type, default_value_dialect" +
+		    generated_cols + "{BRANCH_ID_COL}) VALUES " + column_insert_sql + ";";
 	}
 
 	return batch_query;
@@ -6936,20 +7251,23 @@ WHERE c.end_snapshot IS NULL AND c.branch_id != {BRANCH_ID}
 	                          dropped_cols, dropped_cols);
 }
 
-string DuckLakeMetadataManager::WriteNewColumns(const vector<DuckLakeNewColumn> &new_columns) {
+string DuckLakeMetadataManager::WriteNewColumns(const vector<DuckLakeNewColumn> &new_columns,
+                                                bool write_formal_generated) {
 	if (new_columns.empty()) {
 		return {};
 	}
 	string column_insert_sql;
 	for (auto &new_col : new_columns) {
-		ColumnToSQLRecursive(new_col.column_info, new_col.table_id, new_col.parent_idx, column_insert_sql);
+		ColumnToSQLRecursive(new_col.column_info, new_col.table_id, new_col.parent_idx, column_insert_sql,
+		                     write_formal_generated);
 	}
 
+	string generated_cols = write_formal_generated ? ", is_generated, generated_expression, generated_dialect" : "";
 	// insert column entries
 	return "INSERT INTO {METADATA_CATALOG}.ducklake_column(column_id, begin_snapshot, end_snapshot, table_id, "
 	       "column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, "
-	       "default_value_type, default_value_dialect{BRANCH_ID_COL}) VALUES " +
-	       column_insert_sql + ";";
+	       "default_value_type, default_value_dialect" +
+	       generated_cols + "{BRANCH_ID_COL}) VALUES " + column_insert_sql + ";";
 }
 
 string DuckLakeMetadataManager::WriteNewViews(const vector<DuckLakeViewInfo> &new_views) {
@@ -8893,6 +9211,85 @@ FROM dropped_tags
 WHERE object_id=tid AND ducklake_tag.key=dropped_tags.key AND end_snapshot IS NULL
 ;)",
 	                          tags_list);
+}
+
+string DuckLakeMetadataManager::WriteNewTypes(const vector<DuckLakeTypeInfo> &new_types) {
+	if (new_types.empty()) {
+		return {};
+	}
+	string type_values;
+	string member_values;
+	for (auto &type_info : new_types) {
+		if (!type_values.empty()) {
+			type_values += ", ";
+		}
+		type_values += StringUtil::Format(
+		    "(%llu, '%s', {SNAPSHOT_ID}, NULL, %llu, %s, %s, %s, %s, %llu)", type_info.type_id, type_info.type_uuid,
+		    type_info.schema_id.index, SQLString(type_info.type_name), SQLString(type_info.type_class),
+		    SQLString(type_info.physical_type), SQLString(type_info.dialect.empty() ? "duckdb" : type_info.dialect),
+		    type_info.branch_id);
+		for (auto &member : type_info.members) {
+			if (!member_values.empty()) {
+				member_values += ", ";
+			}
+			string member_type_sql =
+			    member.member_type.empty() ? "NULL" : SQLString::ToString(member.member_type);
+			member_values += StringUtil::Format("(%llu, %llu, %s, %s)", type_info.type_id, member.member_index,
+			                                    SQLString(member.member_name), member_type_sql);
+		}
+	}
+	string batch = "INSERT INTO {METADATA_CATALOG}.ducklake_type(type_id, type_uuid, begin_snapshot, end_snapshot, "
+	               "schema_id, type_name, type_class, physical_type, dialect, branch_id) VALUES " +
+	               type_values + ";";
+	if (!member_values.empty()) {
+		batch += "INSERT INTO {METADATA_CATALOG}.ducklake_type_member(type_id, member_index, member_name, "
+		         "member_type) VALUES " +
+		         member_values + ";";
+	}
+	return batch;
+}
+
+string DuckLakeMetadataManager::WriteDroppedTypes(const vector<DuckLakeTypeInfo> &dropped_types) {
+	if (dropped_types.empty()) {
+		return {};
+	}
+	string values;
+	for (auto &type_info : dropped_types) {
+		if (!values.empty()) {
+			values += ", ";
+		}
+		values += StringUtil::Format("(%llu, %s)", type_info.schema_id.index, SQLString(type_info.type_name));
+	}
+	return StringUtil::Format(R"(
+WITH dropped_types(sid, tname) AS (
+VALUES %s
+)
+UPDATE {METADATA_CATALOG}.ducklake_type
+SET end_snapshot = {SNAPSHOT_ID}
+FROM dropped_types
+WHERE schema_id = sid AND type_name = tname AND end_snapshot IS NULL
+;)",
+	                          values);
+}
+
+string DuckLakeMetadataManager::WriteNewConstraints(const vector<DuckLakeConstraintInfo> &new_constraints) {
+	if (new_constraints.empty()) {
+		return {};
+	}
+	string values;
+	for (auto &constraint : new_constraints) {
+		if (!values.empty()) {
+			values += ", ";
+		}
+		values += StringUtil::Format("(%llu, %llu, {SNAPSHOT_ID}, NULL, %s, %s, %s, %s, %llu)",
+		                             constraint.table_id.index, constraint.constraint_id,
+		                             SQLString(constraint.constraint_type), SQLString(constraint.expression),
+		                             SQLString(constraint.dialect.empty() ? "duckdb" : constraint.dialect),
+		                             constraint.enforced ? "true" : "false", constraint.branch_id);
+	}
+	return "INSERT INTO {METADATA_CATALOG}.ducklake_table_constraint(table_id, constraint_id, begin_snapshot, "
+	       "end_snapshot, constraint_type, expression, dialect, enforced, branch_id) VALUES " +
+	       values + ";";
 }
 
 template <class T, class OverwrittenValues, class NewValues>

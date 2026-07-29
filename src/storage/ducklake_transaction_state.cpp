@@ -69,7 +69,7 @@ bool DuckLakeTransactionState::SchemaChangesMade() const {
 	return !new_tables.empty() || !dropped_tables.empty() || new_schemas || !dropped_schemas.empty() ||
 	       !dropped_views.empty() || !renamed_views.empty() || !new_scalar_macros.empty() ||
 	       !new_table_macros.empty() || !dropped_scalar_macros.empty() || !dropped_table_macros.empty() ||
-	       !new_udt_tags.empty() || !dropped_udt_tags.empty();
+	       !new_udt_tags.empty() || !dropped_udt_tags.empty() || !new_types.empty() || !dropped_types.empty();
 }
 
 namespace {
@@ -1348,10 +1348,53 @@ void DuckLakeTransactionState::GetNewTableInfo(DuckLakeCommitState &commit_state
 			}
 			auto new_table = DuckLakeTransaction::GetNewTable(commit_state, table);
 			auto new_table_id = new_table.id;
+
+			// Enrich formal generated-column fields from column tags (F3e dual-write).
+			auto &table_entry = table.Cast<TableCatalogEntry>();
+			for (auto &col : table_entry.GetColumns().Logical()) {
+				auto gen_it = col.Tags().find("generated");
+				if (gen_it == col.Tags().end()) {
+					continue;
+				}
+				auto &field_id = table.GetFieldId(col.Physical());
+				auto field_idx = field_id.GetFieldIndex();
+				for (auto &col_info : new_table.columns) {
+					if (col_info.id == field_idx) {
+						col_info.is_generated = true;
+						col_info.generated_expression = gen_it->second;
+						col_info.generated_dialect = "duckdb";
+						break;
+					}
+				}
+			}
+			// Dual-write formal CHECK constraints from check_* tags (F3d).
+			for (auto &tag : table_entry.tags) {
+				if (!StringUtil::StartsWith(tag.first, "check_") ||
+				    StringUtil::StartsWith(tag.first, "check_dialect_")) {
+					continue;
+				}
+				auto idx_str = tag.first.substr(6);
+				idx_t constraint_id = 0;
+				try {
+					constraint_id = StringUtil::ToUnsigned(idx_str);
+				} catch (...) {
+					continue;
+				}
+				DuckLakeConstraintInfo constraint;
+				constraint.table_id = new_table_id;
+				constraint.constraint_id = constraint_id;
+				constraint.constraint_type = "check";
+				constraint.expression = tag.second;
+				auto dialect_it = table_entry.tags.find("check_dialect_" + idx_str);
+				constraint.dialect = dialect_it != table_entry.tags.end() ? dialect_it->second : "duckdb";
+				constraint.enforced = false;
+				constraint.branch_id = 0;
+				result.new_constraints.push_back(std::move(constraint));
+			}
+
 			result.new_tables.push_back(std::move(new_table));
 
 			// Persist table comment and tags (including unenforced CHECK / generated markers)
-			auto &table_entry = table.Cast<TableCatalogEntry>();
 			if (!table_entry.comment.IsNull()) {
 				DuckLakeTagInfo comment_info;
 				comment_info.id = new_table_id.index;
@@ -1647,10 +1690,12 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 			resolved_table_paths.push_back(DuckLakeMetadataManager::GetRelativePath(
 			    table.schema_id, table.path, new_schemas_result, context.query_metadata, data_path, separator));
 		}
-		batch_queries += DuckLakeMetadataManager::WriteNewTables(result.new_tables, resolved_table_paths);
+		batch_queries += DuckLakeMetadataManager::WriteNewTables(result.new_tables, resolved_table_paths,
+		                                                         context.supports_formal_metadata);
 		auto existing_catalog =
 		    DuckLakeMetadataManager::BuildCatalogForSnapshot(commit_snapshot, context.query_metadata_with_snapshot,
-		                                                     data_path, separator, context.supports_v1_1_metadata);
+		                                                     data_path, separator, context.supports_v1_1_metadata,
+		                                                     context.supports_formal_metadata);
 		batch_queries +=
 		    DuckLakeMetadataManager::WriteNewPartitionKeys(existing_catalog.partitions, result.new_partition_keys);
 		batch_queries += DuckLakeMetadataManager::WriteNewViews(result.new_views);
@@ -1660,9 +1705,16 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 			batch_queries += DuckLakeMetadataManager::WriteNewViewColumnTags(result.new_view_column_tags);
 		}
 		batch_queries += DuckLakeMetadataManager::WriteDroppedColumns(result.dropped_columns);
-		batch_queries += DuckLakeMetadataManager::WriteNewColumns(result.new_columns);
+		batch_queries +=
+		    DuckLakeMetadataManager::WriteNewColumns(result.new_columns, context.supports_formal_metadata);
 		batch_queries += context.write_inlined_tables(commit_snapshot, result.new_inlined_data_tables);
 		batch_queries += DuckLakeMetadataManager::WriteNewSortKeys(existing_catalog.sorts, result.new_sort_keys);
+		if (context.supports_formal_metadata && !result.new_constraints.empty()) {
+			for (auto &constraint : result.new_constraints) {
+				constraint.branch_id = context.branch_id;
+			}
+			batch_queries += DuckLakeMetadataManager::WriteNewConstraints(result.new_constraints);
+		}
 		new_tables_result = result.new_tables;
 		new_inlined_data_tables_result = result.new_inlined_data_tables;
 	}
@@ -1673,6 +1725,7 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 	}
 
 	// Persist CREATE/DROP TYPE as schema tags (object_id = schema_id, key = udt:<name>)
+	// and dual-write formal ducklake_type rows when supported.
 	if (!new_udt_tags.empty()) {
 		vector<DuckLakeTagInfo> tags = new_udt_tags;
 		for (auto &tag : tags) {
@@ -1690,6 +1743,24 @@ string DuckLakeTransactionState::CommitChanges(DuckLakeCommitState &commit_state
 			tag.id = sid.index;
 		}
 		batch_queries += DuckLakeMetadataManager::DropTags(tags);
+	}
+	if (context.supports_formal_metadata && !new_types.empty()) {
+		vector<DuckLakeTypeInfo> types = new_types;
+		for (auto &type_info : types) {
+			commit_state.RemapIdentifier(type_info.schema_id);
+			if (DuckLakeTransaction::IsTransactionLocal(type_info.type_id)) {
+				type_info.type_id = commit_state.commit_snapshot.next_catalog_id++;
+			}
+			type_info.branch_id = context.branch_id;
+		}
+		batch_queries += DuckLakeMetadataManager::WriteNewTypes(types);
+	}
+	if (context.supports_formal_metadata && !dropped_types.empty()) {
+		vector<DuckLakeTypeInfo> types = dropped_types;
+		for (auto &type_info : types) {
+			commit_state.RemapIdentifier(type_info.schema_id);
+		}
+		batch_queries += DuckLakeMetadataManager::WriteDroppedTypes(types);
 	}
 
 	// write new name maps
