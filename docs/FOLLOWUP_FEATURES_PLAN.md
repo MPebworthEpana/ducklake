@@ -25,9 +25,9 @@ encodings while new writes move to formal tables.
 | **F3c** | `ducklake_type` (+ members) | Yes | P2 | **Done** |
 | **F3d** | `ducklake_table_constraint` | Yes | P2 | **Done** |
 | **F3e** | Formal generated-column columns | Yes | P3 | **Done** |
-| **R1** | Python DuckDB→DuckLake migrator updates | Docs + script | P1 | **Open** |
-| **R2** | Live Postgres/SQLite/Quack matrix verification | No | P1 | **Open** |
-| **R3** | Upstream ducklake.select type/migration docs publish | Docs site | P1 | **Open** |
+| **R1** | Python DuckDB→DuckLake migrator updates | Docs + script | P1 | **Done** |
+| **R2** | Live Postgres/SQLite/Quack matrix verification | No | P1 | **Done (DuckDB; scanners TBD)** |
+| **R3** | Upstream ducklake.select type/migration docs publish | Docs site | P1 | **Done (fork package)** |
 
 Shipped: **F1 → F2 → F3a–F3e**. Remaining closeout: **R2 ∥ R1 → R3** (matrix can run in parallel with migrator; publish after fork docs + migrator script are ready).
 
@@ -654,8 +654,9 @@ fork-only).
 
 ## Recommendation
 
-**F1–F3e are done on `main`.** Next: execute **R1–R3** so migrations, multi-catalog
-CI confidence, and public docs match the extension. Never enforce PK/FK.
+**F1–F3e and R1–R3 fork deliverables are implemented.** Remaining external steps:
+rebuild with sqlite/postgres scanners and re-run the matrix; open/merge the
+`duckdb/ducklake-web` PR from the port package. Never enforce PK/FK.
 Optional later: sunset dual-write tags; virtual generated columns stay out of
 scope.
 
@@ -672,9 +673,10 @@ scope.
 | **F3c** | Done | `ducklake_type` + members; dual-write `udt:*`; MigrateV15; `1.1-dev6` |
 | **F3d** | Done | `ducklake_table_constraint`; dual-write `check_*` |
 | **F3e** | Done | `ducklake_column.is_generated` / `generated_expression` / `generated_dialect` |
-| **R1** | Open | Vendor + fix migrator; preserve ARRAY/ENUM/generated |
-| **R2** | Open | Run/fix matrix on Postgres/SQLite/Quack; record results |
-| **R3** | Open | `ducklake-web` port for data types + migration + unsupported-features |
+| **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` + `scripts/tests/`; ARRAY/ENUM/generated preserved; `--legacy-casts` opt-in; DuckLake py-integration skipped on ABI mismatch |
+| **R2** | Done (DuckDB) | `scripts/run_unsupported_catalog_matrix.sh` + [`CATALOG_MATRIX_UNSUPPORTED.md`](CATALOG_MATRIX_UNSUPPORTED.md); DuckDB 9/9 PASS; PG/SQLite/Quack SKIP until scanners built |
+| **R3** | Done (fork package) | `docs/ducklake-web/` types/migration/unsupported patches; live `duckdb/ducklake-web` PR still needs a maintainer |
 
 Shipped tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready
-`array` / `enum` / `generated_columns`.
+`array` / `enum` / `generated_columns`; migrator unit tests via
+`python3 scripts/tests/test_duckdb_to_ducklake_migrate.py -v`.

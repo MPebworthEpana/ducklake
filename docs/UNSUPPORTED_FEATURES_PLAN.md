@@ -402,9 +402,9 @@ Still out of scope: virtual generated columns; optional later sunset of dual-wri
 | **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
 | **U5** | Done | `ducklake_table_constraint` (+ `check_*` dual-write); `ducklake_enforce_checks` optional |
 | **F1–F3e** | Done | See follow-up plan; F3a matrix-*ready*, F3b fork docs only |
-| **R1** | Open | Migrator preserve ARRAY/ENUM/generated |
-| **R2** | Open | Live PG/SQLite/Quack matrix verification |
-| **R3** | Open | Upstream ducklake.select publish (types + migration) |
+| **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` preserves ARRAY/ENUM/generated |
+| **R2** | Done (DuckDB) | Matrix helper + DuckDB green; PG/SQLite/Quack need scanner builds |
+| **R3** | Done (fork package) | `docs/ducklake-web/` patches; upstream PR pending maintainer |
 
 Tests: `default_expressions`, `nested_defaults`, `types/array`, `types/enum`,
 `general/generated_columns`, `constraints/unsupported`, `constraints/check_enforce`,
