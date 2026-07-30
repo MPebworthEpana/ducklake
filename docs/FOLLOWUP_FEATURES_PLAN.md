@@ -1,11 +1,12 @@
 # Follow-up Features Plan
 
-Closes the three remaining adjuncts after U0–U5 in
+Closes the adjuncts after U0–U5 in
 [`UNSUPPORTED_FEATURES_PLAN.md`](UNSUPPORTED_FEATURES_PLAN.md):
 
-1. **F1** — Nested expression defaults (`STRUCT` / `LIST` / `MAP` / `ARRAY`)
-2. **F2** — Optional CHECK enforcement (`ducklake_enforce_checks`)
-3. **F3** — Full catalog matrix + formal spec tables
+1. **F1–F3e** — Nested defaults, optional CHECK enforcement, catalog formalization
+   (**implemented on `main`**)
+2. **R1–R3** — Residual closeout: Python migrator, live catalog-matrix verification,
+   upstream ducklake.select publish (**planned below; not yet done**)
 
 This plan is for **this fork** (`MPebworthEpana/ducklake`). It prefers
 **compat-preserving** schema evolution: keep reading today’s tag / type-string
@@ -15,17 +16,20 @@ encodings while new writes move to formal tables.
 
 ## Verdict
 
-| ID | Feature | Spec change? | Priority | Why now |
+| ID | Feature | Spec change? | Priority | Status |
 |---|---|---|---|---|
-| **F1** | Nested column defaults | No | P0 | Create-time reject + reload bug; blocks real nested schemas |
-| **F2** | Optional CHECK enforcement | No (setting) | P1 | U5 exit criteria; tags already persist |
-| **F3a** | Catalog matrix for U1–U5 tests | No | P1 | Prove Postgres/SQLite/Quack round-trip |
-| **F3b** | Formalize `array` / `enum` in type strings | Docs + minor | P1 | Already encoded in `column_type`; spec lags |
-| **F3c** | `ducklake_type` (+ members) | Yes | P2 | Replace `udt:*` schema tags |
-| **F3d** | `ducklake_table_constraint` | Yes | P2 | Replace `check_*` table tags |
-| **F3e** | Formal generated-column columns | Yes | P3 | Replace `generated` / `generated:*` tags |
+| **F1** | Nested column defaults | No | P0 | **Done** |
+| **F2** | Optional CHECK enforcement | No (setting) | P1 | **Done** |
+| **F3a** | Matrix-*ready* test attach paths + ENUM inline fix | No | P1 | **Done** (verification → **R2**) |
+| **F3b** | Fork type encodings doc (`SPEC_DATA_TYPES.md`) | Docs | P1 | **Done** (upstream publish → **R3**) |
+| **F3c** | `ducklake_type` (+ members) | Yes | P2 | **Done** |
+| **F3d** | `ducklake_table_constraint` | Yes | P2 | **Done** |
+| **F3e** | Formal generated-column columns | Yes | P3 | **Done** |
+| **R1** | Python DuckDB→DuckLake migrator updates | Docs + script | P1 | **Done** |
+| **R2** | Live Postgres/SQLite/Quack matrix verification | No | P1 | **Done (DuckDB; scanners TBD)** |
+| **R3** | Upstream ducklake.select type/migration docs publish | Docs site | P1 | **Done (fork package)** |
 
-Ship order: **F1 → F2 → F3a → F3b → F3c/F3d → F3e**.
+Shipped: **F1 → F2 → F3a–F3e**. Remaining closeout: **R2 ∥ R1 → R3** (matrix can run in parallel with migrator; publish after fork docs + migrator script are ready).
 
 Hard rules (same as U0–U5):
 
@@ -413,32 +417,270 @@ Parallelizable: **F2** anytime after U5; **F3a** anytime; **F3b** docs-only;
 | Enforced PK / UNIQUE / FK | Unchanged skip |
 | Virtual generated columns | Scan-time forever; out of scope |
 | Enforcing CHECK on foreign writers / `add_files` | Lakehouse reality |
-| Breaking removal of tags in the same release as dual-write | Compat |
-| Python DuckDB→DuckLake migrator updates | Separate follow-up once F3b+ land |
+| Breaking removal of tags in the same release as dual-write | Compat; sunset is optional later |
+
+---
+
+## Residual closeout (R1–R3)
+
+F1–F3e shipped the extension features. These three leftovers still block
+“migration + multi-catalog + public docs” completeness.
+
+### R1 — Python DuckDB→DuckLake migrator (P1)
+
+#### Problem
+
+The public guide
+[DuckDB to DuckLake](https://ducklake.select/docs/stable/duckdb/migrations/duckdb_to_ducklake)
+embeds a Python script that still **casts away** features this fork now supports:
+
+| Source DuckDB type / feature | Script today | Desired (this fork) |
+|---|---|---|
+| `INTEGER[N]` / `VARCHAR[N]` / `FLOAT[N]` | Cast → `T[]` (list) | Preserve as fixed-size `ARRAY` / `array(N)` |
+| `ENUM(...)` / named ENUM | Cast → `VARCHAR` | Preserve ENUM (column type or `CREATE TYPE`) |
+| `UNION` / `VARINT` / `BIT` | Cast → VARCHAR/INT | **Keep casting** (still skipped) |
+| Generated columns / non-literal defaults | Values baked via `CREATE TABLE AS SELECT` | Prefer `CREATE TABLE` with `AS (expr)` / `DEFAULT expr`, then `INSERT` omitting generated/default cols where possible |
+| Macros | Only when catalog_type=`duckdb` | Unchanged for PG/SQLite; for DuckDB catalog prefer DuckLake macros when available |
+
+#### Source of truth
+
+- **Upstream docs page:** `duckdb/ducklake-web` →
+  `docs/stable/duckdb/migrations/duckdb_to_ducklake.md` (script is inline today).
+- **Fork working copy (create):** `scripts/duckdb_to_ducklake_migrate.py` +
+  `docs/ducklake-web/docs/stable/duckdb/migrations/duckdb_to_ducklake.md`
+  (same port-package pattern as branching).
+
+Vendoring the script in-repo lets us unit-test it before opening the
+`ducklake-web` PR (R3).
+
+#### Fix (task breakdown)
+
+1. **Vendor** the current upstream script into
+   `scripts/duckdb_to_ducklake_migrate.py` (byte-compatible CLI flags).
+2. **ARRAY:** In `_resolve_data_types`, stop casting `T[N]` → `T[]`. Leave the
+   column type alone so DuckLake receives fixed-size arrays.
+3. **ENUM:** Stop matching `ENUM` into `::VARCHAR`. For anonymous
+   `ENUM('a','b')` columns, create as-is. For named types
+   (`CREATE TYPE mood AS ENUM ...`), emit `CREATE TYPE` on the DuckLake
+   attachment before table create (query `duckdb_types` /
+   `information_schema` for user types in the source catalog).
+4. **Generated / expression defaults:** Detect via `duckdb_columns()`
+   (`is_generated`, `generation_expression`, `column_default`). Prefer:
+   ```sql
+   CREATE TABLE dst (... , gen AS (expr), col DEFAULT expr, ...);
+   INSERT INTO dst (physical_non_generated_cols) SELECT ... FROM src;
+   ```
+   Fall back to today’s CTAS bake-in only if expression bind fails on DuckLake.
+5. **Keep** `UNION` / `VARINT` / `BIT` casts; keep macro path for DuckDB
+   metadata catalogs (optionally try `CREATE MACRO` on DuckLake first).
+6. **Tests:** `test/python/duckdb_to_ducklake_migrate.test` or a small
+   `scripts/tests/test_duckdb_to_ducklake_migrate.py` that:
+   - Builds a source DuckDB with ARRAY, ENUM, generated, UNION columns
+   - Runs the script into a temp DuckLake (DuckDB catalog)
+   - Asserts `typeof` / `SHOW CREATE` preserve ARRAY/ENUM/generated and still
+     cast UNION
+7. **Docs:** Update the fork `ducklake-web` migration page copy to say ARRAY /
+   ENUM / STORED generated are preserved when the target DuckLake supports them
+   (link [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md)).
+
+#### Exit criteria
+
+- Script no longer casts `T[N]` or `ENUM` to list/VARCHAR.
+- Generated columns survive as DuckLake generated (or documented fallback).
+- Automated test covers the happy path on DuckDB-catalog DuckLake.
+- Fork docs page matches script behavior (feeds R3).
+
+#### Risks
+
+- Named ENUM + STRUCT aliases need `CREATE TYPE` ordering (dependency queue
+  already exists for views — extend for types).
+- Older DuckLake targets without U1–U3 must keep the cast path behind a
+  `--legacy-casts` flag or version probe (`ducklake_version` / try-create).
+
+---
+
+### R2 — Live catalog matrix verification (P1)
+
+#### Problem
+
+F3a made array/enum/generated/(+ F1/F2) tests **matrix-ready** via
+`{DUCKLAKE_CONNECTION}`, but they were only proven on the **DuckDB** catalog.
+CI workflow [`.github/workflows/Catalogs.yml`](../.github/workflows/Catalogs.yml)
+already runs `test/sql/*` under Postgres and SQLite configs; confidence still
+needs a recorded pass/fail + fixes for any new failures.
+
+#### Scope
+
+Target suites (minimum):
+
+| Suite | Path |
+|---|---|
+| Nested defaults | `test/sql/default/nested_defaults.test` |
+| CHECK enforce | `test/sql/constraints/check_enforce.test` |
+| Formal metadata | `test/sql/catalog/formal_metadata.test` |
+| ARRAY / ENUM / generated | `test/sql/types/array.test`, `enum.test`, `general/generated_columns.test` |
+| Related smoke | `default_expressions`, `constraints/unsupported`, `drop_cascade` |
+
+Backends: DuckDB (default), SQLite (`test/configs/sqlite.json`), Postgres
+(`test/configs/postgres.json`), Quack (`scripts/run_quack_tests.py` /
+`test/configs/quack.json` when scanner present).
+
+#### Fix (task breakdown)
+
+1. **Helper script** `scripts/run_unsupported_catalog_matrix.sh` (mirror
+   [`scripts/run_branching_catalog_matrix.sh`](../scripts/run_branching_catalog_matrix.sh)):
+   ```bash
+   FILTERS=(
+     test/sql/default/nested_defaults.test
+     test/sql/constraints/check_enforce.test
+     test/sql/catalog/formal_metadata.test
+     test/sql/types/array.test
+     test/sql/types/enum.test
+     test/sql/general/generated_columns.test
+   )
+   # duckdb → sqlite.json → postgres.json (needs createdb ducklakedb)
+   # optional quack.json
+   ```
+2. **Local baseline** with `BUILD=build/debug` (or release),
+   `ENABLE_SQLITE_SCANNER=ON` / `ENABLE_POSTGRES_SCANNER=ON` as in Catalogs.yml.
+3. **Triage failures** in priority order:
+   - `METADATA_CATALOG 'xx'` assumptions on Postgres (attach/search_path)
+   - Identifier / inlining VARCHAR fallbacks for ARRAY/ENUM (already coded;
+     assert behavior, don’t expect native PG ENUM)
+   - `formal_metadata.test` queries against `xx.ducklake_type` — ensure metadata
+     catalog name resolves on each backend
+4. **Skip policy:** add `skip_tests` entries in
+   `test/configs/{postgres,sqlite,quack}.json` **only** with a tracked reason
+   and issue/TODO; prefer fix.
+5. **CI evidence:** either rely on green `Catalogs.yml` on the PR that closes
+   R2, or add an optional job step that runs the helper filters first for a
+   faster signal (same pattern discussed for branching in
+   [`branching/NEAR_TERM_FOLLOWUPS.md`](branching/NEAR_TERM_FOLLOWUPS.md) F3).
+6. **Record** a pass/fail table in this plan’s Implementation status (or a short
+   `docs/CATALOG_MATRIX_UNSUPPORTED.md` note).
+
+#### Exit criteria
+
+- Helper script green locally for DuckDB + SQLite.
+- Postgres green locally or in CI (`Catalogs.yml`) for the filter list.
+- Quack: green, or explicitly skipped with reason if environment lacks scanner.
+- No silent skips of the new suites without a logged reason.
+- F3a status can be read as “verified”, not only “matrix-ready”.
+
+#### Risks
+
+- `formal_metadata.test` is DuckDB-metadata-catalog flavored (`METADATA_CATALOG
+  'xx'`); may need a variant or config-specific expected relations.
+- SQLite locking flakes — reuse existing `skip_error_messages` / skip lists.
+
+---
+
+### R3 — Upstream ducklake.select publish (P1)
+
+#### Problem
+
+Fork docs describe `array(N)` / `enum('…')` and formal tables in
+[`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md), but the live site still omits them:
+
+- [Data Types](https://ducklake.select/docs/stable/specification/data_types) —
+  nested types list only `list` / `struct` / `map` (no `array`, no `enum`).
+- [DuckDB → DuckLake migration](https://ducklake.select/docs/stable/duckdb/migrations/duckdb_to_ducklake)
+  — still documents ENUM→VARCHAR and ARRAY→list casts; script outdated vs R1.
+- Unsupported-features / constraints pages may still list shipped items as
+  unsupported.
+
+Publishing is an out-of-repo change to
+[`duckdb/ducklake-web`](https://github.com/duckdb/ducklake-web) (same path as
+branching’s [`docs/ducklake-web/`](ducklake-web/README.md) package).
+
+#### Fix (task breakdown)
+
+1. **Port package under** `docs/ducklake-web/` (extend the branching package):
+   | Path in `ducklake-web` | Action |
+   |---|---|
+   | `docs/stable/specification/data_types.md` | **Edit** — add `array(N)` + `enum('…')` nested/UDT encodings from `SPEC_DATA_TYPES.md`; note PG/SQLite inlining VARCHAR fallback |
+   | `docs/stable/duckdb/migrations/duckdb_to_ducklake.md` | **Edit** — replace script with R1 version; rewrite “casts” narrative |
+   | `docs/stable/duckdb/unsupported_features.md` (or equivalent) | **Edit** — mark ARRAY/ENUM/generated/CHECK/CASCADE/defaults as supported where accurate; keep PK/FK/UNION skips |
+   | `docs/stable/specification/` metadata pages | **Edit if needed** — document `ducklake_type`, `ducklake_table_constraint`, generated_* columns (`1.1-dev6` / note fork versioning) |
+2. **Menu / cross-links:** only if new pages are added; type encodings likely
+   edit in place.
+3. **Tracking:** open/claim a `duckdb/ducklake-web` issue (Needs Documentation
+   label workflow or manual), titled e.g.
+   `[ducklake] Document array/enum types + updated DuckDB migrator`.
+4. **Apply steps** (maintainer / fork with write access):
+   ```bash
+   git clone https://github.com/duckdb/ducklake-web.git
+   # copy/edit files from docs/ducklake-web/ package
+   ./scripts/lint.sh
+   # open PR against duckdb/ducklake-web
+   ```
+5. After merge/publish, add live URL pointers in this repo’s
+   [`docs/README.md`](README.md) and mark R3 Done here.
+6. **Fork vs upstream versioning:** if `1.1-dev6` formal tables are
+   fork-only, gate that section with “DuckLake ≥ 1.1-dev6 (fork)” or wait until
+   upstream adopts the same migration — do **not** claim upstream catalog
+   support the fork has not landed.
+
+#### Exit criteria
+
+- Live data-types page lists `array` / `enum` encodings.
+- Live migration page + script preserve ARRAY/ENUM/generated (per R1).
+- Unsupported-features page no longer lists shipped items as missing.
+- In-repo port package matches what was submitted upstream.
+- This plan marks R3 Done with the live URLs.
+
+#### Risks
+
+- Upstream may reject fork-only `1.1-dev6` tables — publish type-string
+  encodings (`array(N)`, `enum`) first; formal tables in a follow-up PR.
+- Dual sources of truth — keep `SPEC_DATA_TYPES.md` as fork canonical; web
+  package is the publish snapshot (same as branching guide).
+
+---
+
+## Suggested residual ship order
+
+```text
+R2  Live matrix verification          (CI/local; parallelizable)
+R1  Vendored migrator + tests + fork docs page
+R3  ducklake-web port package + upstream PR
+```
+
+R2 does not depend on R1. R3 should include R1’s script/docs. Formal-table
+spec paragraphs in R3 can ship after upstream agrees on `1.1-dev6` (or stay
+fork-only).
 
 ---
 
 ## Recommendation
 
-Implement **F1 then F2** as small extension-only PRs (high user impact, no
-spec version bump). Land **F3a** immediately after so nested defaults and
-CHECK enforcement are proven on every catalog backend. Formal tables
-(**F3c–F3e**) should ride a metadata version bump with dual-read of tags
-and a clear sunset note — do not block F1/F2 on that work.
+**F1–F3e and R1–R3 fork deliverables are implemented.** Remaining verification
+and publish handoff are specified as **V1–V3** in
+[`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md)
+(scanner matrix, ABI-matched migrator integration, maintainer docs publish).
+Never enforce PK/FK. Optional later: sunset dual-write tags; virtual generated
+columns stay out of scope.
 
 ---
 
-## Implementation status (this branch)
+## Implementation status
 
 | ID | Status | Notes |
 |---|---|---|
-| **F1** | Done | Nested STRUCT/LIST/MAP/ARRAY defaults accept, persist, reload; see `test/sql/default/nested_defaults.test` |
-| **F2** | Done | `ducklake_enforce_checks` (default false); INSERT/UPDATE/MERGE verification |
-| **F3a** | Done | array/enum/generated tests use `{DUCKLAKE_CONNECTION}`; ENUM non-native on PG/SQLite |
-| **F3b** | Done | [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md) documents `array(N)` / `enum('…')` |
-| **F3c** | Done | `ducklake_type` + members; dual-write `udt:*`; MigrateV15; version `1.1-dev6` |
+| **F1** | Done | Nested STRUCT/LIST/MAP/ARRAY defaults; `test/sql/default/nested_defaults.test` |
+| **F2** | Done | `ducklake_enforce_checks`; INSERT/UPDATE/MERGE verification |
+| **F3a** | Done (ready) | Tests use `{DUCKLAKE_CONNECTION}`; ENUM non-native on PG/SQLite — **live verify = R2** |
+| **F3b** | Done (fork) | [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md) — **upstream publish = R3** |
+| **F3c** | Done | `ducklake_type` + members; dual-write `udt:*`; MigrateV15; `1.1-dev6` |
 | **F3d** | Done | `ducklake_table_constraint`; dual-write `check_*` |
 | **F3e** | Done | `ducklake_column.is_generated` / `generated_expression` / `generated_dialect` |
+| **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` + `scripts/tests/`; ARRAY/ENUM/generated preserved; `--legacy-casts` opt-in; DuckLake py-integration skipped on ABI mismatch |
+| **R2** | Done (DuckDB) | `scripts/run_unsupported_catalog_matrix.sh` + [`CATALOG_MATRIX_UNSUPPORTED.md`](CATALOG_MATRIX_UNSUPPORTED.md); DuckDB 9/9 PASS; PG/SQLite/Quack SKIP until scanners built |
+| **R3** | Done (fork package) | `docs/ducklake-web/` types/migration/unsupported patches; live `duckdb/ducklake-web` PR still needs a maintainer |
+| **V1** | Open | PG/SQLite/Quack matrix — [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md) |
+| **V2** | Open | Migrator DuckLake py integration — same |
+| **V3** | Open (handoff) | Maintainer publishes port package upstream |
 
-Tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready `array` / `enum` / `generated_columns`.
-
+Shipped tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready
+`array` / `enum` / `generated_columns`; migrator unit tests via
+`python3 scripts/tests/test_duckdb_to_ducklake_migrate.py -v`.

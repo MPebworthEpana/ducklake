@@ -5,7 +5,8 @@ Documents `column_type` encodings this fork already persists in
 `DuckLakeTypes::{ToString,FromString}` and nest via `parent_column`.
 
 Published ducklake.select data-types docs may lag; this file is the fork source
-of truth until upstream catches up.
+of truth until **R3** publishes them via `docs/ducklake-web/` (see
+[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md)).
 
 ---
 

@@ -22,10 +22,10 @@ enforced PK/FK/UNIQUE. Treat CHECK as optional metadata later.
 | **Done** | `VARIANT`, macros in DuckLake catalog | Spec already has them | Older docs listed these; current tree supports both |
 | **Done (U0)** | Expression-default completeness | Small | `ADD COLUMN … DEFAULT expr`, `UPDATE … SET DEFAULT` |
 | **Done (U1)** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Stored as `array(N)` + child `element` |
-| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + persisted `CREATE TYPE` |
-| **Done (U3)** | Stored generated columns | Tags / reuse expression-default fields | Constant + column-ref; evaluate on INSERT/UPDATE |
+| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + `ducklake_type` (dual-write `udt:*`) |
+| **Done (U3)** | Stored generated columns | Formal `generated_*` + tags | Constant + column-ref; evaluate on INSERT/UPDATE |
 | **Done (U4)** | `DROP … CASCADE` for views/macros | No (catalog walk) | Drops dependent views; RESTRICT lists them |
-| **Done (U5)** | Unenforced `CHECK` (optional) | Yes | Stored as `check_*` tags; not validated on write |
+| **Done (U5)** | Unenforced `CHECK` (optional) | Yes | Formal `ducklake_table_constraint` (+ `check_*` dual-write); optional `ducklake_enforce_checks` |
 | **Skip** | Enforced PK / UNIQUE / FK | N/A | Prohibitive on lake data; use `MERGE INTO` |
 | **Skip / cast** | `UNION`, `VARINT`, `BIT`, collations | N/A | Cast-on-migrate is fine; low ROI |
 
@@ -41,8 +41,9 @@ Stable unsupported-features docs still list some items that this tree already ha
 3. **Macros** — first-class DuckLake macros (`ducklake_macro*`), not only the old
    “create macro in `__ducklake_metadata_*`” workaround.
 
-**U0** closed the ALTER / `SET DEFAULT` holes. Nested expression defaults
-(`STRUCT` / `LIST` / `MAP` / `ARRAY`) remain out of scope.
+**U0** closed the ALTER / `SET DEFAULT` holes. **F1** added nested column
+defaults for `STRUCT` / `LIST` / `MAP` / `ARRAY` (see
+[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md)).
 
 ---
 
@@ -333,13 +334,16 @@ Parallelizable: **U4** anytime; **U1** independent of U2/U3; **U3** after U0.
 
 ## Migration Script Impact
 
-Once U1–U3 land, update the Python migrator from the docs so it:
+U1–U3 have landed. Closing the migrator gap is **R1** in
+[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md) (full task breakdown):
 
-1. Preserves `T[N]` as ARRAY (no cast to list).
-2. Preserves ENUMs (no `::VARCHAR`) when U2 exists.
-3. Emits STORED generated columns instead of baking values only.
-4. Keeps casting `UNION` / `VARINT` / `BIT`.
-5. Continues two-step handling only for features still missing (e.g. virtual generated).
+1. Preserve `T[N]` as ARRAY (no cast to list).
+2. Preserve ENUMs (no `::VARCHAR`); emit `CREATE TYPE` for named ENUMs.
+3. Prefer STORED generated columns / expression defaults over CTAS bake-in.
+4. Keep casting `UNION` / `VARINT` / `BIT`.
+5. Two-step handling only for features still missing (e.g. virtual generated).
+6. Vendor script at `scripts/duckdb_to_ducklake_migrate.py` + port page under
+   `docs/ducklake-web/` for upstream publish (**R3**).
 
 ---
 
@@ -359,39 +363,52 @@ Once U1–U3 land, update the Python migrator from the docs so it:
 
 ## Implementation Notes in This Tree
 
-| Location | Current behavior |
+| Location | Current behavior (post U0–U5 / F1–F3e) |
 |---|---|
-| `src/common/ducklake_types.cpp` | No `array` / ENUM / UDT serialization |
-| `src/storage/ducklake_schema_entry.cpp` | `CreateType` / cascade drop throw |
-| `src/storage/ducklake_table_entry.cpp` | Rejects generated cols; CHECK/PK/FK |
-| `src/storage/ducklake_field_data.cpp` | ARRAY case present; expression ADD COLUMN blocked |
-| `src/storage/ducklake_metadata_manager.cpp` | Already has `default_value_type` / `default_value_dialect` |
-| `test/sql/types/unsupported.test` | Documents ARRAY/UNION/ENUM/collation rejects |
-| `test/sql/constraints/unsupported.test` | Documents PK + CHECK rejects |
+| `src/common/ducklake_types.cpp` | Serializes `array(N)` and `enum('…')`; see [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md) |
+| `src/storage/ducklake_schema_entry.cpp` | `CREATE TYPE` + `DROP … CASCADE` for dependent views |
+| `src/storage/ducklake_table_entry.cpp` | Accepts CHECK + generated (materialized); still rejects PK/UNIQUE/FK |
+| `src/storage/ducklake_field_data.cpp` | Nested + expression defaults supported; scan backfill uses constant `initial_default` only |
+| `src/storage/ducklake_metadata_manager.cpp` | Expression defaults + formal `ducklake_type` / `ducklake_table_constraint` / generated_* (`1.1-dev6`) |
+| `test/sql/types/unsupported.test` | Documents remaining rejects (`UNION`, collations, …) |
+| `test/sql/constraints/unsupported.test` | Documents PK reject; CHECK create allowed (unenforced by default) |
 
 ---
 
 ## Recommendation
 
-**U0–U5 are implemented on this branch.** Remaining adjuncts (nested
-expression defaults, optional CHECK enforcement, catalog matrix / formal
-spec tables) are planned in
-[`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md) and type encodings in [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md). Never enforce
-PK/FK in DuckLake. Virtual generated columns and the Python migrator remain
-separate follow-ups.
+**U0–U5 and F1–F3e are implemented on `main`.** Remaining closeout is specified
+as **R1–R3** in [`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md):
+
+| ID | Closeout |
+|---|---|
+| **R1** | Python DuckDB→DuckLake migrator — preserve ARRAY/ENUM/generated |
+| **R2** | Live Postgres/SQLite/Quack verification of matrix-ready suites |
+| **R3** | Publish type + migration docs to ducklake.select via `docs/ducklake-web/` |
+
+Type encodings: [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md). Remaining verification /
+publish handoff: [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md)
+(V1 matrix, V2 migrator py integration, V3 maintainer docs publish). Never enforce PK/FK.
+Still out of scope: virtual generated columns; optional later sunset of dual-write tags.
 
 ---
 
-## Implementation status (this branch)
+## Implementation status (on `main`)
 
 | ID | Status | Notes |
 |---|---|---|
 | **U0** | Done | `ADD COLUMN … DEFAULT expr` backfills NULL; `UPDATE … SET DEFAULT` resolves bound defaults |
 | **U1** | Done | `array(N)` type + nested child `element`; postgres/sqlite inline as VARCHAR |
-| **U2** | Done | Column ENUMs as `enum('…')`; `CREATE TYPE` ENUM/STRUCT persists via schema tags `udt:<name>` |
-| **U3** | Done | Constant + column-ref generated columns materialize as physical cols; evaluated on INSERT/UPDATE; direct UPDATE of generated cols rejected |
+| **U2** | Done | Column ENUMs as `enum('…')`; `CREATE TYPE` via `ducklake_type` (+ `udt:*` dual-write) |
+| **U3** | Done | Constant + column-ref generated; formal `generated_*` cols (+ tag dual-write) |
 | **U4** | Done | `DROP TABLE/VIEW … CASCADE` drops dependent views; RESTRICT lists them |
-| **U5** | Done | Unenforced `CHECK` stored as `check_*` table tags; not validated on write |
+| **U5** | Done | `ducklake_table_constraint` (+ `check_*` dual-write); `ducklake_enforce_checks` optional |
+| **F1–F3e** | Done | See follow-up plan; F3a matrix-*ready*, F3b fork docs only |
+| **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` preserves ARRAY/ENUM/generated |
+| **R2** | Done (DuckDB) | Matrix helper + DuckDB green; PG/SQLite/Quack need scanner builds |
+| **R3** | Done (fork package) | `docs/ducklake-web/` patches; upstream PR pending maintainer |
 
-Tests: `test/sql/default/default_expressions.test`, `types/array.test`, `types/enum.test`,
-`general/generated_columns.test`, `constraints/unsupported.test`, `catalog/drop_cascade.test`.
+Tests: `default_expressions`, `nested_defaults`, `types/array`, `types/enum`,
+`general/generated_columns`, `constraints/unsupported`, `constraints/check_enforce`,
+`catalog/drop_cascade`, `catalog/formal_metadata`.
+
