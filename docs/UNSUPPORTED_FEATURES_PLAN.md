@@ -22,8 +22,8 @@ enforced PK/FK/UNIQUE. Treat CHECK as optional metadata later.
 | **Done** | `VARIANT`, macros in DuckLake catalog | Spec already has them | Older docs listed these; current tree supports both |
 | **Done (U0)** | Expression-default completeness | Small | `ADD COLUMN … DEFAULT expr`, `UPDATE … SET DEFAULT` |
 | **Done (U1)** | Fixed-size `ARRAY` | Yes (`array` nested type + size) | Stored as `array(N)` + child `element` |
-| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + persisted `CREATE TYPE` |
-| **Done (U3)** | Stored generated columns | Tags / reuse expression-default fields | Constant + column-ref; evaluate on INSERT/UPDATE |
+| **Done (U2)** | `ENUM` (and STRUCT-alias UDTs) | Yes (type catalog / enum metadata) | Column ENUMs + `ducklake_type` (dual-write `udt:*`) |
+| **Done (U3)** | Stored generated columns | Formal `generated_*` + tags | Constant + column-ref; evaluate on INSERT/UPDATE |
 | **Done (U4)** | `DROP … CASCADE` for views/macros | No (catalog walk) | Drops dependent views; RESTRICT lists them |
 | **Done (U5)** | Unenforced `CHECK` (optional) | Yes | Formal `ducklake_table_constraint` (+ `check_*` dual-write); optional `ducklake_enforce_checks` |
 | **Skip** | Enforced PK / UNIQUE / FK | N/A | Prohibitive on lake data; use `MERGE INTO` |
