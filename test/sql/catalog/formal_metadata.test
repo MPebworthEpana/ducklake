@@ -51,8 +51,9 @@ check	(i > j)	duckdb
 statement ok
 CREATE TABLE ducklake.gen(c1 INT, c2 INT AS (c1 + 1));
 
+# Cast boolean for SQLite catalogs (BOOLEAN affinity surfaces as 0/1 integers)
 query III
-SELECT column_name, is_generated, generated_expression
+SELECT column_name, (is_generated IS TRUE), generated_expression
 FROM xx.ducklake_column
 WHERE end_snapshot IS NULL AND is_generated
 ORDER BY column_name
