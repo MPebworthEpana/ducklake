@@ -677,9 +677,9 @@ columns stay out of scope.
 | **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` + `scripts/tests/`; ARRAY/ENUM/generated preserved; `--legacy-casts` opt-in; DuckLake py-integration skipped on ABI mismatch |
 | **R2** | Done (DuckDB) | `scripts/run_unsupported_catalog_matrix.sh` + [`CATALOG_MATRIX_UNSUPPORTED.md`](CATALOG_MATRIX_UNSUPPORTED.md); DuckDB 9/9 PASS; PG/SQLite/Quack SKIP until scanners built |
 | **R3** | Done (fork package) | `docs/ducklake-web/` types/migration/unsupported patches; live `duckdb/ducklake-web` PR still needs a maintainer |
-| **V1** | Open | PG/SQLite/Quack matrix — [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md) |
-| **V2** | Open | Migrator DuckLake py integration — same |
-| **V3** | Open (handoff) | Maintainer publishes port package upstream |
+| **V1** | Done (DQ+SQLite+PG) | Matrix green; Quack optional — [`CATALOG_MATRIX_UNSUPPORTED.md`](CATALOG_MATRIX_UNSUPPORTED.md) |
+| **V2** | Done (CLI smoke) | `scripts/tests/test_migrate_cli_smoke.sh`; py ABI recipe in `scripts/tests/README.md` |
+| **V3** | Fork handoff complete | [ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396) |
 
 Shipped tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready
 `array` / `enum` / `generated_columns`; migrator unit tests via

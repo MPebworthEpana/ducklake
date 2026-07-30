@@ -69,8 +69,18 @@ run_filters() {
 has_ext() {
   local ext="$1"
   [[ -x "$DUCKDB_BIN" ]] || return 1
-  "$DUCKDB_BIN" -unsigned -c "SELECT installed OR loaded FROM duckdb_extensions() WHERE extension_name='$ext';" 2>/dev/null \
-    | grep -qi true
+  if "$DUCKDB_BIN" -unsigned -c "SELECT installed OR loaded FROM duckdb_extensions() WHERE extension_name='$ext';" 2>/dev/null \
+    | grep -qi true; then
+    return 0
+  fi
+  # Loadable extension artifact present in this build (not always linked into the binary)
+  if [[ -f "$BUILD/extension/${ext}/${ext}.duckdb_extension" ]]; then
+    return 0
+  fi
+  if [[ -d "$BUILD/repository" ]] && find "$BUILD/repository" -name "${ext}*.duckdb_extension" 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  return 1
 }
 
 run_filters "duckdb-catalog"
@@ -90,9 +100,13 @@ if has_ext postgres_scanner || has_ext postgres; then
     export PGPASSWORD="${PGPASSWORD:-postgres}"
     export PGPORT="${PGPORT:-5432}"
     export DUCKLAKE_CI="${DUCKLAKE_CI:-1}"
+    # Unittest loads postgres_scanner from the local build repository
+    export LOCAL_EXTENSION_REPO="${LOCAL_EXTENSION_REPO:-$ROOT/$BUILD/repository}"
     unset PGSERVICE || true
     createdb ducklakedb 2>/dev/null || true
-    run_filters "postgres-catalog" "test/configs/postgres.json"
+    run_filters "postgres-catalog" "test/configs/postgres.json" \
+      "LOCAL_EXTENSION_REPO=$LOCAL_EXTENSION_REPO" \
+      "PGHOST=$PGHOST" "PGUSER=$PGUSER" "PGPASSWORD=$PGPASSWORD" "PGPORT=$PGPORT" "DUCKLAKE_CI=$DUCKLAKE_CI"
   fi
 else
   echo "SKIP postgres-catalog: postgres_scanner not built into $DUCKDB_BIN"

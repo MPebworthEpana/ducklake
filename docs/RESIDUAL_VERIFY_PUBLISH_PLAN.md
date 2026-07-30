@@ -18,9 +18,9 @@ for unfinished verification and the out-of-repo docs publish.
 
 | ID | Priority | Owner shape | Blocker today |
 |---|---|---|---|
-| **V1** | P0 | Anyone with a full Catalogs-style build | Debug binary built without scanners |
-| **V2** | P0 | Anyone who can align Python DuckDB with extension source-id | PyPI DuckDB ≠ built extension ABI |
-| **V3** | P1 | Maintainer with write access to `duckdb/ducklake-web` (or a fork+PR) | This agent/environment cannot push upstream |
+| **V1** | P0 | Engineering | **Done** for DuckDB+SQLite+Postgres; Quack still optional |
+| **V2** | P0 | Engineering | **Done** via CLI smoke (+ unit tests); full py LOAD still ABI-gated |
+| **V3** | P1 | Maintainer | **Fork handoff done** ([ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396)); live merge pending |
 
 Ship order: **V1 ∥ V2 → V3** (publish after migrator/docs package is integration-proven).
 
@@ -250,8 +250,9 @@ tracking issue text         →  review + lint + merge          →  URLs in REA
 ### Exit criteria
 
 - Tracking issue or upstream PR exists and is linked from this plan / README.
+  (**Met for fork handoff:** [duckdb/ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396).)
 - After merge: live data-types + migration pages match the package; this plan
-  records the URLs.
+  records the URLs. (Maintainer-owned; still pending.)
 
 ### If upstream is slow
 
@@ -282,13 +283,12 @@ and ideally a green V2 so the published migrator script is integration-proven.
 | **R1–R3** | Done (fork) | Migrator, matrix helper, ducklake-web package — see follow-up plan / PR #17 |
 | **V1** | Open | Need scanner-enabled rebuild + matrix fill-in |
 | **V2** | Open | Need ABI-matched DuckLake py integration (or CLI smoke) |
-| **V3** | Open (handoff) | Package ready; upstream publish is maintainer-owned |
+| **V3** | Fork handoff complete | Tracking issue template at [`ducklake-web/UPSTREAM_ISSUE.md`](ducklake-web/UPSTREAM_ISSUE.md); filed [duckdb/ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396); README “Pending upstream publish” in place. **Live** ducklake.select publish remains maintainer-owned (apply package + PR/merge). |
 
 ---
 
 ## Recommendation
 
-Do **V1 and V2** as one engineering PR on this fork (rebuild instructions + CI
-hooks + integration test recipe). Handle **V3** as a short maintainer checklist
-attached to that PR / a `ducklake-web` issue — do not block lake features on the
-docs site going live.
+**V1–V3 fork work is implemented on this branch.** Re-run Quack when convenient.
+Maintainer applies `docs/ducklake-web/` via [ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396).
+Do not block lake features on the docs site going live.

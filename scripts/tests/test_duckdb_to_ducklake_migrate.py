@@ -43,10 +43,34 @@ def _find_ducklake_extension() -> str | None:
     return None
 
 
+def _python_duckdb_identity() -> str:
+    if duckdb is None:
+        return "duckdb package not installed"
+    parts = [f"version={getattr(duckdb, '__version__', '?')}"]
+    git_rev = getattr(duckdb, "__git_revision__", None) or getattr(
+        duckdb, "__git_hash__", None
+    )
+    if git_rev:
+        parts.append(f"source_id={git_rev}")
+    parts.append(f"file={getattr(duckdb, '__file__', '?')}")
+    return ", ".join(parts)
+
+
+def _abi_skip_detail(ext: str | None, err: Exception) -> str:
+    """Actionable skip reason pointing at the ABI-matched recipe README."""
+    return (
+        f"LOAD failed: {err}; "
+        f"Python duckdb: {_python_duckdb_identity()}; "
+        f"extension: {ext or '(none)'}; "
+        "see scripts/tests/README.md (ABI-matched Python recipe + "
+        "DUCKLAKE_EXTENSION_PATH), or run bash scripts/tests/test_migrate_cli_smoke.sh"
+    )
+
+
 def _can_load_ducklake() -> tuple[bool, str]:
     """Return (ok, detail). Sets DUCKLAKE_EXTENSION_PATH when a local build is found."""
     if duckdb is None:
-        return False, "duckdb package not installed"
+        return False, "duckdb package not installed; see scripts/tests/README.md"
     ext = _find_ducklake_extension()
     con = duckdb.connect()
     try:
@@ -60,7 +84,7 @@ def _can_load_ducklake() -> tuple[bool, str]:
                 con.execute(f"LOAD '{ext}'")
                 return True, ext
             except Exception as e:
-                return False, f"LOAD '{ext}' failed: {e}"
+                return False, _abi_skip_detail(ext, e)
         local_repo = os.environ.get("LOCAL_EXTENSION_REPO")
         if local_repo:
             try:
@@ -68,13 +92,17 @@ def _can_load_ducklake() -> tuple[bool, str]:
                 con.execute("LOAD ducklake")
                 return True, f"LOCAL_EXTENSION_REPO={local_repo}"
             except Exception as e:
-                return False, f"LOAD from LOCAL_EXTENSION_REPO failed: {e}"
+                return False, _abi_skip_detail(local_repo, e)
         try:
             con.execute("INSTALL ducklake FROM 'community'")
             con.execute("LOAD ducklake")
             return True, "community"
         except Exception as e:
-            return False, f"ducklake unavailable: {e}"
+            return (
+                False,
+                f"ducklake unavailable: {e}; see scripts/tests/README.md "
+                "or bash scripts/tests/test_migrate_cli_smoke.sh",
+            )
     finally:
         con.close()
 
