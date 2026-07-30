@@ -386,7 +386,9 @@ as **R1–R3** in [`FOLLOWUP_FEATURES_PLAN.md`](FOLLOWUP_FEATURES_PLAN.md):
 | **R2** | Live Postgres/SQLite/Quack verification of matrix-ready suites |
 | **R3** | Publish type + migration docs to ducklake.select via `docs/ducklake-web/` |
 
-Type encodings: [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md). Never enforce PK/FK.
+Type encodings: [`SPEC_DATA_TYPES.md`](SPEC_DATA_TYPES.md). Remaining verification /
+publish handoff: [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md)
+(V1 matrix, V2 migrator py integration, V3 maintainer docs publish). Never enforce PK/FK.
 Still out of scope: virtual generated columns; optional later sunset of dual-write tags.
 
 ---

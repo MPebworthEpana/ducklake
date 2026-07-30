@@ -654,11 +654,12 @@ fork-only).
 
 ## Recommendation
 
-**F1–F3e and R1–R3 fork deliverables are implemented.** Remaining external steps:
-rebuild with sqlite/postgres scanners and re-run the matrix; open/merge the
-`duckdb/ducklake-web` PR from the port package. Never enforce PK/FK.
-Optional later: sunset dual-write tags; virtual generated columns stay out of
-scope.
+**F1–F3e and R1–R3 fork deliverables are implemented.** Remaining verification
+and publish handoff are specified as **V1–V3** in
+[`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md)
+(scanner matrix, ABI-matched migrator integration, maintainer docs publish).
+Never enforce PK/FK. Optional later: sunset dual-write tags; virtual generated
+columns stay out of scope.
 
 ---
 
@@ -676,6 +677,9 @@ scope.
 | **R1** | Done | `scripts/duckdb_to_ducklake_migrate.py` + `scripts/tests/`; ARRAY/ENUM/generated preserved; `--legacy-casts` opt-in; DuckLake py-integration skipped on ABI mismatch |
 | **R2** | Done (DuckDB) | `scripts/run_unsupported_catalog_matrix.sh` + [`CATALOG_MATRIX_UNSUPPORTED.md`](CATALOG_MATRIX_UNSUPPORTED.md); DuckDB 9/9 PASS; PG/SQLite/Quack SKIP until scanners built |
 | **R3** | Done (fork package) | `docs/ducklake-web/` types/migration/unsupported patches; live `duckdb/ducklake-web` PR still needs a maintainer |
+| **V1** | Open | PG/SQLite/Quack matrix — [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md) |
+| **V2** | Open | Migrator DuckLake py integration — same |
+| **V3** | Open (handoff) | Maintainer publishes port package upstream |
 
 Shipped tests: `nested_defaults`, `check_enforce`, `formal_metadata`, matrix-ready
 `array` / `enum` / `generated_columns`; migrator unit tests via

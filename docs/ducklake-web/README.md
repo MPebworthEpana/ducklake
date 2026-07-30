@@ -97,3 +97,14 @@ Suggested body:
   keep UNION/VARINT/BIT casts; point at / embed updated migrator
 - Mark ARRAY, ENUM, expression defaults, STORED generated, DROP CASCADE, and
   unenforced CHECK (+ optional enforce) as supported on unsupported-features
+
+---
+
+## Publish ownership (V3)
+
+This directory is a **ready-to-apply port package**. Pushing to
+[`duckdb/ducklake-web`](https://github.com/duckdb/ducklake-web) / updating
+ducklake.select requires a maintainer (or a human-opened fork PR). See
+[`../RESIDUAL_VERIFY_PUBLISH_PLAN.md`](../RESIDUAL_VERIFY_PUBLISH_PLAN.md) §V3 for
+the handoff checklist. Fork docs remain canonical until the live site catches up.
+
