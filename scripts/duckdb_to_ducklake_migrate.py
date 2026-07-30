@@ -114,12 +114,62 @@ def get_postgres_secret() -> str:
         );"""
 
 
+def _python_duckdb_identity() -> str:
+    """Describe the imported duckdb package for ABI mismatch diagnostics."""
+    parts = [
+        f"version={getattr(duckdb, '__version__', '?')}",
+        f"file={getattr(duckdb, '__file__', '?')}",
+    ]
+    git_rev = getattr(duckdb, "__git_revision__", None) or getattr(
+        duckdb, "__git_hash__", None
+    )
+    if git_rev:
+        parts.insert(1, f"source_id={git_rev}")
+    return ", ".join(parts)
+
+
+def _abi_mismatch_hint(ext_path: Optional[str], err: BaseException) -> str:
+    """Actionable message when LOAD fails due to DuckDB source-id / ABI mismatch."""
+    lines = [
+        f"Failed to LOAD ducklake extension: {err}",
+        f"  Python duckdb: {_python_duckdb_identity()}",
+    ]
+    if ext_path:
+        lines.append(f"  Extension path: {ext_path}")
+    lines.extend(
+        [
+            "  The extension must be built for the same DuckDB source-id as the",
+            "  Python package. Rebuild Python duckdb against the pinned DuckDB",
+            "  commit in .github/duckdb-version (bindings live in duckdb-python;",
+            "  the duckdb/ submodule no longer vendors tools/pythonpkg), then:",
+            "    export DUCKLAKE_EXTENSION_PATH="
+            "$PWD/build/debug/extension/ducklake/ducklake.duckdb_extension",
+            "  See scripts/tests/README.md for the ABI-matched recipe.",
+            "  Fallback (no Python rebuild): bash scripts/tests/test_migrate_cli_smoke.sh",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def load_ducklake(con: duckdb.DuckDBPyConnection) -> None:
-    """LOAD the ducklake extension using env overrides or INSTALL/LOAD."""
+    """LOAD the ducklake extension using env overrides or INSTALL/LOAD.
+
+    Prefer ``DUCKLAKE_EXTENSION_PATH``. On ABI / source-id mismatch, raise with
+    an actionable message naming both the Python duckdb identity and extension path.
+    """
     ext_path = os.environ.get("DUCKLAKE_EXTENSION_PATH")
     if ext_path:
-        con.execute(f"LOAD '{ext_path}'")
-        return
+        try:
+            con.execute(f"LOAD '{ext_path}'")
+            return
+        except Exception as e:
+            msg = str(e)
+            if "built specifically for DuckDB version" in msg or "can only be loaded" in msg:
+                raise RuntimeError(_abi_mismatch_hint(ext_path, e)) from e
+            raise RuntimeError(
+                f"Failed to LOAD '{ext_path}': {e}\n"
+                f"  Python duckdb: {_python_duckdb_identity()}"
+            ) from e
 
     local_repo = os.environ.get("LOCAL_EXTENSION_REPO")
     if local_repo:
@@ -136,7 +186,10 @@ def load_ducklake(con: duckdb.DuckDBPyConnection) -> None:
                 con.execute("INSTALL ducklake")
                 con.execute("LOAD ducklake")
                 return
-            except Exception:
+            except Exception as e:
+                msg = str(e)
+                if "built specifically for DuckDB version" in msg or "can only be loaded" in msg:
+                    raise RuntimeError(_abi_mismatch_hint(local_repo, e)) from e
                 pass
 
     try:
@@ -147,7 +200,13 @@ def load_ducklake(con: duckdb.DuckDBPyConnection) -> None:
         con.execute("INSTALL ducklake")
     except Exception:
         pass
-    con.execute("LOAD ducklake")
+    try:
+        con.execute("LOAD ducklake")
+    except Exception as e:
+        msg = str(e)
+        if "built specifically for DuckDB version" in msg or "can only be loaded" in msg:
+            raise RuntimeError(_abi_mismatch_hint(ext_path or "(community/default)", e)) from e
+        raise
 
 
 def _duckdb_columns_has_generated(con: duckdb.DuckDBPyConnection) -> bool:

@@ -106,6 +106,24 @@ The ducklake.select port lives in [`docs/ducklake-web/`](ducklake-web/README.md)
 Intended live URL once published:
 [Branching](https://ducklake.select/docs/stable/duckdb/guides/branching).
 
+### Pending upstream publish
+
+Fork docs and the [`docs/ducklake-web/`](ducklake-web/README.md) port package are
+canonical until a maintainer merges into
+[`duckdb/ducklake-web`](https://github.com/duckdb/ducklake-web). Expected live
+URLs after publish:
+
+- https://ducklake.select/docs/stable/duckdb/guides/branching
+- https://ducklake.select/docs/stable/specification/data_types (with array/enum)
+- https://ducklake.select/docs/stable/duckdb/migrations/duckdb_to_ducklake
+- https://ducklake.select/docs/stable/duckdb/unsupported_features
+
+Tracking issue:
+[duckdb/ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396)
+(body template: [`ducklake-web/UPSTREAM_ISSUE.md`](ducklake-web/UPSTREAM_ISSUE.md)).
+Handoff checklist: [`RESIDUAL_VERIFY_PUBLISH_PLAN.md`](RESIDUAL_VERIFY_PUBLISH_PLAN.md) §V3.
+Live site merge/publish remains maintainer-owned (no push to `ducklake-web` from this fork).
+
 ## Building & Loading the Extension
 
 To build, type

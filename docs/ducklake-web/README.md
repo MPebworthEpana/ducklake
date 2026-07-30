@@ -89,14 +89,15 @@ Open / claim a `duckdb/ducklake-web` issue titled:
 
 **`[ducklake] Document array/enum types + updated DuckDB migrator`**
 
-Suggested body:
+Ready-to-paste body: [`UPSTREAM_ISSUE.md`](UPSTREAM_ISSUE.md).
 
-- Add `array(N)` and `enum('…')` to the nested types section of data types
-- Note Postgres/SQLite inlining as VARCHAR for non-native ARRAY/ENUM
-- Update DuckDB→DuckLake migration page: preserve ARRAY/ENUM/STORED generated;
-  keep UNION/VARINT/BIT casts; point at / embed updated migrator
-- Mark ARRAY, ENUM, expression defaults, STORED generated, DROP CASCADE, and
-  unenforced CHECK (+ optional enforce) as supported on unsupported-features
+**Filed:** [duckdb/ducklake-web#396](https://github.com/duckdb/ducklake-web/issues/396)
+
+```bash
+gh issue create -R duckdb/ducklake-web \
+  --title "[ducklake] Document array/enum types + updated DuckDB migrator" \
+  --body-file docs/ducklake-web/UPSTREAM_ISSUE.md
+```
 
 ---
 
